@@ -1,0 +1,104 @@
+
+
+
+datasource db1 {
+  provider = "postgresql"
+  url      = env("DATABASE_URL_1")
+}
+
+datasource db2 {
+  provider = "postgresql"
+  url      = env("DATABASE_URL_2")
+}
+
+datasource db3 {
+  provider = "postgresql"
+  url      = env("DATABASE_URL_3")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id                 String     @id @default(uuid())
+  email              String     @unique
+  passwordHash       String
+  freeCredits        Int        @default(1500)
+  creatorCredits     Int        @default(0)
+  createdAt          DateTime   @default(currentTime())
+  isMonetized        Boolean    @default(false)
+  daysMonetized      Int        @default(0)
+  referredBy         String?
+}
+
+model MediaPost {
+  id        String   @id @default(uuid())
+  userId    String
+  mediaUrl  String
+  thumbUrl  String
+  type      String   // "reel" | "explore"
+  status    String   // "PENDING" | "APPROVED" | "REJECTED"
+  shard     String   // "A" | "B" | "C"
+  createdAt DateTime @default(currentTime())
+}
+
+model Novel {
+  id        String   @id @default(uuid())
+  userId    String
+  title     String
+  content   String   @db.Text
+  createdAt DateTime @default(currentTime())
+}
+
+model Story {
+  id        String   @id @default(uuid())
+  userId    String
+  title     String
+  content   String   @db.Text
+  createdAt DateTime @default(currentTime())
+}
+
+model Follow {
+  id          String @id @default(uuid())
+  followerId  String
+  followingId String
+}
+
+model Like {
+  id        String   @id @default(uuid())
+  postId    String
+  userId    String
+  createdAt DateTime @default(currentTime())
+}
+
+model Comment {
+  id        String   @id @default(uuid())
+  postId    String
+  userId    String
+  text      String
+  createdAt DateTime @default(currentTime())
+}
+
+model Referral {
+  id         String   @id @default(uuid())
+  referrerId String
+  refereeId  String   @unique
+  createdAt  DateTime @default(currentTime())
+}
+
+model ViewLog {
+  id        String   @id @default(uuid())
+  postId    String
+  userId    String
+  createdAt DateTime @default(currentTime())
+}
+
+model PointsLedger {
+  id        String   @id @default(uuid())
+  userId    String
+  amount    Int
+  type      String   // "FREE" | "CREATOR"
+  reason    String   // "VIEW", "REFERRAL", "SIGNUP", etc.
+  createdAt DateTime @default(currentTime())
+}
