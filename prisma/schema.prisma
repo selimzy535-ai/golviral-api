@@ -1,19 +1,16 @@
-
-
-
 datasource db1 {
   provider = "postgresql"
-  url      = env("DATABASE_URL_1")
+  url = env("DATABASE_URL1")
 }
 
 datasource db2 {
   provider = "postgresql"
-  url      = env("DATABASE_URL_2")
+  url = env("DATABASE_URL2")
 }
 
 datasource db3 {
   provider = "postgresql"
-  url      = env("DATABASE_URL_3")
+  url = env("DATABASE_URL3")
 }
 
 generator client {
@@ -21,84 +18,115 @@ generator client {
 }
 
 model User {
-  id                 String     @id @default(uuid())
-  email              String     @unique
-  passwordHash       String
-  freeCredits        Int        @default(1500)
-  creatorCredits     Int        @default(0)
-  createdAt          DateTime   @default(currentTime())
-  isMonetized        Boolean    @default(false)
-  daysMonetized      Int        @default(0)
-  referredBy         String?
+  id Int @id @default(autoincrement())
+  username String @unique
+  email String @unique
+  password String
+  freeCredits Int @default(1500)
+  monetizedAt DateTime?
+  freeFarmingStopped Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  mediaPosts MediaPost[] @relation("UserPosts")
+  follows Follow[] @relation("Follower")
+  followers Follow[] @relation("Following")
+
+  @@map("users")
+  @@schema("db1")
 }
 
 model MediaPost {
-  id        String   @id @default(uuid())
-  userId    String
-  mediaUrl  String
-  thumbUrl  String
-  type      String   // "reel" | "explore"
-  status    String   // "PENDING" | "APPROVED" | "REJECTED"
-  shard     String   // "A" | "B" | "C"
-  createdAt DateTime @default(currentTime())
-}
+  id Int @id @default(autoincrement())
+  userId Int
+  type String // 'video' or 'image'
+  caption String?
+  b2Key String
+  thumbUrl String?
+  status String @default("pending") // pending, approved, rejected
+  views Int @default(0)
+  likes Int @default(0)
+  comments Int @default(0)
+  createdAt DateTime @default(now())
 
-model Novel {
-  id        String   @id @default(uuid())
-  userId    String
-  title     String
-  content   String   @db.Text
-  createdAt DateTime @default(currentTime())
-}
+  user User @relation("UserPosts", fields: [userId], references: [id])
 
-model Story {
-  id        String   @id @default(uuid())
-  userId    String
-  title     String
-  content   String   @db.Text
-  createdAt DateTime @default(currentTime())
-}
-
-model Follow {
-  id          String @id @default(uuid())
-  followerId  String
-  followingId String
+  @@index([userId])
+  @@index([status])
+  @@map("media_posts")
+  @@schema("db1")
 }
 
 model Like {
-  id        String   @id @default(uuid())
-  postId    String
-  userId    String
-  createdAt DateTime @default(currentTime())
+  id Int @id @default(autoincrement())
+  userId Int
+  postId Int
+  createdAt DateTime @default(now())
+
+  @@unique([userId, postId])
+  @@index([postId])
+  @@map("likes")
+  @@schema("db2")
 }
 
 model Comment {
-  id        String   @id @default(uuid())
-  postId    String
-  userId    String
-  text      String
-  createdAt DateTime @default(currentTime())
+  id Int @id @default(autoincrement())
+  userId Int
+  postId Int
+  text String
+  createdAt DateTime @default(now())
+
+  @@index([postId])
+  @@map("comments")
+  @@schema("db2")
 }
 
 model Referral {
-  id         String   @id @default(uuid())
-  referrerId String
-  refereeId  String   @unique
-  createdAt  DateTime @default(currentTime())
+  id Int @id @default(autoincrement())
+  referrerId Int
+  referredId Int
+  createdAt DateTime @default(now())
+
+  @@index([referrerId])
+  @@map("referrals")
+  @@schema("db2")
 }
 
 model ViewLog {
-  id        String   @id @default(uuid())
-  postId    String
-  userId    String
-  createdAt DateTime @default(currentTime())
+  id Int @id @default(autoincrement())
+  postId Int
+  viewerId Int
+  createdAt DateTime @default(now())
+
+  @@unique([postId, viewerId])
+  @@index([postId])
+  @@map("view_logs")
+  @@schema("db2")
 }
 
 model PointsLedger {
-  id        String   @id @default(uuid())
-  userId    String
-  amount    Int
-  type      String   // "FREE" | "CREATOR"
-  reason    String   // "VIEW", "REFERRAL", "SIGNUP", etc.
-  createdAt DateTime @default(currentTime())
+  id Int @id @default(autoincrement())
+  userId Int
+  amount Float
+  type String // 'free' or 'cash'
+  reason String // 'view', 'like', 'comment', 'post_fee', 'withdraw'
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([type])
+  @@map("points_ledger")
+  @@schema("db3")
+}
+
+model Follow {
+  id Int @id @default(autoincrement())
+  followerId Int
+  followingId Int
+  createdAt DateTime @default(now())
+
+  follower User @relation("Follower", fields: [followerId], references: [id])
+  following User @relation("Following", fields: [followingId], references: [id])
+
+  @@unique([followerId, followingId])
+  @@map("follows")
+  @@schema("db1")
 }
