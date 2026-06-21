@@ -1,32 +1,36 @@
 {
-  "name": "golviral-api",
+  "name": "v45-reels-app-backend",
   "version": "4.5.0",
-  "description": "GolViral backend API - 3x shard + 10s buffer + B2 + split rewards",
+  "description": "Sharded production backend optimized for deployment on Render",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "prisma:deploy": "prisma migrate deploy"
+    "render:build": "npm install"
   },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.400.0",
-    "@aws-sdk/s3-request-presigner": "^3.400.0",
-    "@prisma/client": "^5.7.0",
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/s3-request-presigner": "^3.600.0",
+    "@prisma/client": "^5.16.0",
+    "axios": "^1.7.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "ioredis": "^5.3.2",
+    "crypto": "^1.0.1",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "ioredis": "^5.4.1",
     "jsonwebtoken": "^9.0.2",
-    "node-cron": "^3.0.2",
-    "node-fetch": "^3.3.2"
+    "morgan": "^1.10.0",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.14"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1",
-    "prisma": "^5.7.0"
+    "nodemon": "^3.1.4"
   },
   "engines": {
-    "node": "20.x"
+    "node": ">=18.0.0"
   }
 }
