@@ -26,9 +26,9 @@ const APP_BASE_URL = process.env.APP_BASE_URL || 'https://v45-reels-app.pwa';
 
 // ========== 3x SHARDING CLIENTS ==========
 const prismaClients = {
-  db1: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_1 } } }),
-  db2: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_2 } } }),
-  db3: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_3 } } }),
+  db1: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_1 || "postgresql://mock:fallback@localhost:5432/db1" } } }),
+  db2: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_2 || "postgresql://mock:fallback@localhost:5432/db2" } } }),
+  db3: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_3 || "postgresql://mock:fallback@localhost:5432/db3" } } }),
 };
 
 const redisClients = {
