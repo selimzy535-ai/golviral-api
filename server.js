@@ -6,14 +6,14 @@ const { PrismaClient } = require('@prisma/client');
 const Redis = require('ioredis');
 const cron = require('node-cron');
 const nodemailer = require('nodemailer');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const axios = require('axios');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 
-// --- INIT ---
+// ========== INIT ==========
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
@@ -24,7 +24,7 @@ const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_shard_key_2026';
 const APP_BASE_URL = process.env.APP_BASE_URL || 'https://v45-reels-app.pwa';
 
-// ========== 3x SHARDING ==========
+// ========== 3x SHARDING CLIENTS ==========
 const prismaClients = {
   db1: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_1 } }),
   db2: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_2 } }),
@@ -43,38 +43,32 @@ const b2Clients = {
   b2c: new S3Client({ endpoint: process.env.B2_ENDPOINT_C, credentials: { accessKeyId: process.env.B2_KEY_ID_C, secretAccessKey: process.env.B2_APPLICATION_KEY_C }, region: process.env.B2_REGION_C }),
 };
 
-// ========== v4.5 SHARDING: NUMERIC % 3 ==========
-function getShardIndex(userId) {
-  // userId is string → convert to int via base36
-  return parseInt(userId, 36) % 3;
+// ========== SHARDING HELPERS v4.5 ==========
+function getShardIndex(id) {
+  return parseInt(id, 36) % 3;
 }
 
 function getDbShard(userId) {
   const idx = getShardIndex(userId);
-  if (idx === 0) return { client: prismaClients.db1, name: 'db1' };
-  if (idx === 1) return { client: prismaClients.db2, name: 'db2' };
-  return { client: prismaClients.db3, name: 'db3' };
+  return idx === 0? { client: prismaClients.db1 } : idx === 1? { client: prismaClients.db2 } : { client: prismaClients.db3 };
 }
 
 function getRedisShard(userId) {
   const idx = getShardIndex(userId);
-  if (idx === 0) return redisClients.redis1;
-  if (idx === 1) return redisClients.redis2;
-  return redisClients.redis3;
+  return idx === 0? redisClients.redis1 : idx === 1? redisClients.redis2 : redisClients.redis3;
 }
 
 function getB2Shard(postId) {
-  const idx = parseInt(postId, 36) % 3; // FIXED: b2Clients not b2clients
-  if (idx === 0) return { client: b2Clients.b2a, bucket: process.env.B2_BUCKET_A };
-  if (idx === 1) return { client: b2Clients.b2b, bucket: process.env.B2_BUCKET_B };
-  return { client: b2Clients.b2c, bucket: process.env.B2_BUCKET_C };
+  const idx = getShardIndex(postId);
+  return idx === 0? { client: b2Clients.b2a, bucket: process.env.B2_BUCKET_A } :
+         idx === 1? { client: b2Clients.b2b, bucket: process.env.B2_BUCKET_B } :
+         { client: b2Clients.b2c, bucket: process.env.B2_BUCKET_C };
 }
 
 async function findUserAcrossShards(field, value) {
-  const shards = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
-  for (let i = 0; i < shards.length; i++) {
-    const user = await shards[i].user.findUnique({ where: { [field]: value } });
-    if (user) return { user, db: shards[i] };
+  for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
+    const user = await db.user.findUnique({ where: { [field]: value } });
+    if (user) return { user, db };
   }
   return null;
 }
@@ -82,27 +76,24 @@ async function findUserAcrossShards(field, value) {
 // ========== 10s BUFFER ==========
 let interactionBuffer = [];
 
-// ========== EMAIL ==========
+// ========== EMAIL ENGINE ==========
 async function sendMailNotification(email, subject, text) {
   const mailOptions = { from: process.env.EMAIL_FROM, to: email, subject, text };
   try {
-    const brevoTransport = nodemailer.createTransport({
+    const brevo = nodemailer.createTransport({
       host: 'smtp-relay.brevo.com',
       port: 587,
       auth: { user: process.env.BREVO_USER, pass: process.env.BREVO_PASS }
     });
-    await brevoTransport.sendMail(mailOptions);
+    await brevo.sendMail(mailOptions);
   } catch {
     await axios.post('https://api.resend.com/emails', {
-      from: process.env.EMAIL_FROM,
-      to: [email],
-      subject,
-      text
+      from: process.env.EMAIL_FROM, to: [email], subject, text
     }, { headers: { 'Authorization': `Bearer ${process.env.RESEND_API_KEY}` } }).catch(() => {});
   }
 }
 
-// ========== AUTH ==========
+// ========== MIDDLEWARES ==========
 async function verifyTurnstile(req, res, next) {
   const token = req.body.turnstileToken;
   if (!token) return res.status(400).json({ error: 'Captcha required' });
@@ -123,58 +114,50 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// ========== v4.5 WALLET ENGINE ==========
+function verifyAdminKey(req, res, next) {
+  const key = req.headers['x-admin-key'];
+  if (!key || key!== process.env.ADMIN_SECRET_KEY) {
+    return res.status(403).json({ error: 'Admin key required' });
+  }
+  next();
+}
+
+// ========== WALLET ENGINE v4.5 ==========
 async function processWalletTransaction({ userId, action, isCreator, meta = {} }) {
   const redis = getRedisShard(userId);
-  const dbConfig = getDbShard(userId);
-  const lockKey = `lock:${userId}`;
-  const lock = await redis.set(lockKey, '1', 'EX', 2, 'NX');
+  const db = getDbShard(userId);
+  const lock = await redis.set(`lock:${userId}`, '1', 'EX', 2, 'NX');
   if (!lock) throw new Error('Concurrent lock');
 
   try {
-    const user = await dbConfig.client.user.findUnique({ where: { id: userId } });
-    if (!user) throw new Error('User not found');
+    const user = await db.client.user.findUnique({ where: { id: userId } });
+    if (!user) return;
 
-    const isMonetized = user.monetizeFlag;
+    const walletType = user.monetizeFlag? 'CASH' : 'FREE';
     let pointsToAdd = 0;
-    const walletType = isMonetized? 'CASH' : 'FREE';
 
-    // v4.5 split rewards
     switch (action) {
-      case 'LIKE':
-        pointsToAdd = isCreator? 5 : 1;
-        break;
-      case 'COMMENT':
-        pointsToAdd = isCreator? 10 : 3;
-        break;
-      case 'VIEW_REEL':
-        pointsToAdd = isCreator? 0.5 : 0;
-        break;
-      case 'READ_NOVEL':
-      case 'READ_STORY':
-        pointsToAdd = isCreator? 10 : 10; // both get 10pts v4.5
-        break;
-      case 'REFERRAL_BONUS':
-        pointsToAdd = 1000;
-        break;
+      case 'LIKE': pointsToAdd = isCreator? 5 : 1; break;
+      case 'COMMENT': pointsToAdd = isCreator? 10 : 3; break;
+      case 'VIEW_REEL': pointsToAdd = isCreator? 0.5 : 0; break;
+      case 'READ_NOVEL': pointsToAdd = 10; break;
+      case 'READ_STORY': pointsToAdd = 10; break;
+      case 'REFERRAL_BONUS': pointsToAdd = 1000; break;
     }
-
     if (pointsToAdd === 0) return;
 
-    // v4.5: CHECK CAP BEFORE DB WRITE
+    // Daily cap check BEFORE DB
     if (walletType === 'CASH') {
       const today = new Date().toISOString().split('T')[0];
       const capKey = `cap:${userId}:${today}`;
       const current = parseFloat(await redis.get(capKey) || '0');
       if (current >= 10000) return;
-      if (current + pointsToAdd > 10000) {
-        pointsToAdd = 10000 - current;
-      }
+      if (current + pointsToAdd > 10000) pointsToAdd = 10000 - current;
       await redis.incrbyfloat(capKey, pointsToAdd);
       await redis.expire(capKey, 90000);
     }
 
-    // v4.5: DAILY LIMITS FOR ACTORS ONLY
+    // Daily limits for actors only
     if (!isCreator) {
       const limitKey = `limit:${userId}:${action.toLowerCase()}`;
       const count = await redis.incr(limitKey);
@@ -183,11 +166,11 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
       await redis.expire(limitKey, 86400);
     }
 
-    await dbConfig.client.$transaction([
-      dbConfig.client.pointsLedger.create({
+    await db.client.$transaction([
+      db.client.pointsLedger.create({
         data: { userId, amount: pointsToAdd, type: walletType, action, referenceId: meta.refId || '' }
       }),
-      dbConfig.client.user.update({
+      db.client.user.update({
         where: { id: userId },
         data: {
           freeCredits: walletType === 'FREE'? { increment: pointsToAdd } : undefined,
@@ -195,13 +178,12 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
         }
       })
     ]);
-
   } finally {
-    await redis.del(lockKey);
+    await redis.del(`lock:${userId}`);
   }
 }
 
-// ========== ROUTES ==========
+// ========== AUTH ROUTES ==========
 app.post('/api/auth/signup', verifyTurnstile, async (req, res) => {
   const { username, email, password, referralCode } = req.body;
   const existing = await findUserAcrossShards('email', email);
@@ -217,7 +199,8 @@ app.post('/api/auth/signup', verifyTurnstile, async (req, res) => {
       username,
       email,
       password: hashed,
-      freeCredits: 1500, // v4.5 signup bonus
+      freeCredits: 1500,
+      cashBalance: 0,
       monetizeFlag: false,
       freeFarmingStopped: false
     }
@@ -235,60 +218,48 @@ app.post('/api/auth/signup', verifyTurnstile, async (req, res) => {
   const token = jwt.sign({ userId, username }, JWT_SECRET, { expiresIn: '30d' });
   res.status(201).json({ token, userId, profileLink: `${APP_BASE_URL}/u/${userId}` });
 });
-// ========== ADMIN ENDPOINTS v4.5 ==========
-function verifyAdminKey(req, res, next) {
-  const key = req.headers['x-admin-key'];
-  if (!key || key !== process.env.ADMIN_SECRET_KEY) {
-    return res.status(403).json({ error: 'Admin key required' });
-  }
-  next();
-}
 
-// 1. Get all pending payouts
-app.get('/api/admin/payouts', verifyAdminKey, async (req, res) => {
-  const all = [];
-  for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
-    const payouts = await db.payoutQueue.findMany({ 
-      where: { status: 'PENDING' },
-      include: { user: { select: { username: true, email: true } }
-    });
-    all.push(...payouts);
-  }
-  res.json(all);
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  const context = await findUserAcrossShards('email', email);
+  if (!context) return res.status(401).json({ error: 'Invalid credentials' });
+
+  const match = await bcrypt.compare(password, context.user.password);
+  if (!match) return res.status(401).json({ error: 'Invalid credentials' });
+
+  const token = jwt.sign({ userId: context.user.id, username: context.user.username }, JWT_SECRET, { expiresIn: '30d' });
+  res.json({ token, userId: context.user.id, profileLink: `${APP_BASE_URL}/u/${context.user.id}` });
 });
 
-// 2. Reject payout + refund cash
-app.post('/api/admin/payouts/reject', verifyAdminKey, async (req, res) => {
-  const { payoutId, userId, reason } = req.body;
-  const db = getDbShard(userId);
-  
-  const payout = await db.payoutQueue.findUnique({ where: { id: payoutId } });
-  if (!payout) return res.status(404).json({ error: 'Payout not found' });
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  const context = await findUserAcrossShards('email', email);
+  if (!context) return res.json({ message: 'If account exists, code sent' });
 
-  await db.$transaction([
-    db.user.update({ 
-      where: { id: userId }, 
-      data: { cashBalance: { increment: payout.amountPoints } } 
-    }),
-    db.payoutQueue.update({ 
-      where: { id: payoutId }, 
-      data: { status: 'REJECTED', reason } 
-    })
-  ]);
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const redis = getRedisShard(context.user.id);
+  await redis.set(`otp:${email}`, otp, 'EX', 900);
 
-  const user = await db.user.findUnique({ where: { id: userId } });
-  await sendMailNotification(user.email, 'Payout Rejected', `Reason: ${reason}. ${payout.amountPoints}pts refunded.`);
-
-  res.json({ message: 'Payout rejected + refunded' });
+  await sendMailNotification(email, 'Password Reset Code', `Your OTP: ${otp}. Valid 15min.`);
+  res.json({ message: 'If account exists, code sent' });
 });
 
-// Your existing approve endpoint
-app.post('/api/admin/payouts/approve', verifyAdminKey, async (req, res) => {
-  const { payoutId, userId } = req.body;
-  const db = getDbShard(userId);
-  await db.payoutQueue.update({ where: { id: payoutId }, data: { status: 'APPROVED' } });
-  res.json({ success: true });
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+  const context = await findUserAcrossShards('email', email);
+  if (!context) return res.status(400).json({ error: 'Invalid request' });
+
+  const redis = getRedisShard(context.user.id);
+  const savedOtp = await redis.get(`otp:${email}`);
+  if (savedOtp!== otp) return res.status(400).json({ error: 'Invalid or expired OTP' });
+
+  const hash = await bcrypt.hash(newPassword, 12);
+  await context.db.user.update({ where: { email }, data: { password: hash } });
+  await redis.del(`otp:${email}`);
+  res.json({ message: 'Password updated' });
 });
+
+// ========== MEDIA ROUTES ==========
 app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
   const { userId } = req.user;
   const { fileExtension, contentType } = req.body;
@@ -322,8 +293,6 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
 
     await redis.incr(postsKey);
     await redis.expire(postsKey, 86400);
-
-    // Queue worker
     await redis.lpush('video-integrity', JSON.stringify({ postId, userId, key }));
 
     res.json({ postId, presignedUrl: url, bucket: b2.bucket, objectKey: key });
@@ -331,27 +300,7 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     await redis.del(`lock:${userId}`);
   }
 });
-app.get('/api/wallet', authenticateToken, async (req, res) => {
-  const { userId } = req.user;
-  const db = getDbShard(userId);
-  const redis = getRedisShard(userId);
-  const today = new Date().toISOString().split('T')[0];
 
-  const user = await db.user.findUnique({ where: { id: userId } });
-  const todayEarned = parseFloat(await redis.get(`cap:${userId}:${today}`) || '0');
-  const refs = await db.referral.count({ where: { referrerId: userId, status: 'QUALIFIED' } });
-  const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000);
-
-  res.json({
-    freeCredits: user.freeCredits,
-    cashBalance: user.cashBalance,
-    todayEarnings: todayEarned,
-    dailyCapProgress: `${todayEarned}/10000`,
-    daysToMonetize: Math.max(0, 7 - days),
-    refsLeft: Math.max(0, 5 - refs),
-    monetized: user.monetizeFlag
-  });
-});
 app.post('/api/worker/callback', async (req, res) => {
   const { postId, status, userId } = req.body;
   const db = getDbShard(userId);
@@ -371,7 +320,7 @@ app.post('/api/worker/callback', async (req, res) => {
   res.json({ message: 'Approved' });
 });
 
-// v4.5: Buffer endpoints
+// ========== INTERACTION BUFFER ROUTES ==========
 app.post('/api/view', (req, res) => {
   interactionBuffer.push({...req.body, type: 'VIEW', timestamp: Date.now() });
   res.status(202).json({ buffered: true });
@@ -383,11 +332,72 @@ app.post('/api/interact', authenticateToken, (req, res) => {
 });
 
 app.post('/api/read-session', authenticateToken, (req, res) => {
-  interactionBuffer.push({...req.body, userId: req.user.userId, type: 'READ', timestamp: Date.now() });
+  interactionBuffer.push({...req.body, userId: req.userId, type: 'READ', timestamp: Date.now() });
   res.status(202).json({ buffered: true });
 });
 
-// ========== 10s CRON v4.5 ==========
+// ========== WALLET ROUTE ==========
+app.get('/api/wallet', authenticateToken, async (req, res) => {
+  const { userId } = req.user;
+  const db = getDbShard(userId);
+  const redis = getRedisShard(userId);
+  const today = new Date().toISOString().split('T')[0];
+
+  const user = await db.client.user.findUnique({ where: { id: userId } });
+  const todayEarned = parseFloat(await redis.get(`cap:${userId}:${today}`) || '0');
+  const refs = await db.client.referral.count({ where: { referrerId: userId, status: 'QUALIFIED' } });
+  const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000);
+
+  res.json({
+    freeCredits: user.freeCredits,
+    cashBalance: user.cashBalance,
+    todayEarnings: todayEarned,
+    dailyCapProgress: `${todayEarned}/10000`,
+    daysToMonetize: Math.max(0, 7 - days),
+    refsLeft: Math.max(0, 5 - refs),
+    monetized: user.monetizeFlag
+  });
+});
+
+// ========== ADMIN ROUTES ==========
+app.get('/api/admin/payouts', verifyAdminKey, async (req, res) => {
+  const all = [];
+  for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
+    const payouts = await db.payoutQueue.findMany({
+      where: { status: 'PENDING' },
+      include: { user: { select: { username: true, email: true } } }
+    });
+    all.push(...payouts);
+  }
+  res.json(all);
+});
+
+app.post('/api/admin/payouts/approve', verifyAdminKey, async (req, res) => {
+  const { payoutId, userId } = req.body;
+  const db = getDbShard(userId);
+  await db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'APPROVED' } });
+  res.json({ success: true });
+});
+
+app.post('/api/admin/payouts/reject', verifyAdminKey, async (req, res) => {
+  const { payoutId, userId, reason } = req.body;
+  const db = getDbShard(userId);
+
+  const payout = await db.client.payoutQueue.findUnique({ where: { id: payoutId } });
+  if (!payout) return res.status(404).json({ error: 'Payout not found' });
+
+  await db.client.$transaction([
+    db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } }),
+    db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'REJECTED', reason } })
+  ]);
+
+  const user = await db.client.user.findUnique({ where: { id: userId } });
+  await sendMailNotification(user.email, 'Payout Rejected', `Reason: ${reason}. ${payout.amountPoints}pts refunded.`);
+  res.json({ message: 'Payout rejected + refunded' });
+});
+
+// ========== CRONS v4.5 ==========
+// 10s buffer processor
 cron.schedule('*/10 *', async () => {
   if (interactionBuffer.length === 0) return;
   const batch = [...interactionBuffer];
@@ -418,7 +428,7 @@ cron.schedule('*/10 *', async () => {
   }
 });
 
-// ========== MONETIZE CRON 12am v4.5 ==========
+// Monetize unlock 12am daily
 cron.schedule('0 0 *', async () => {
   for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
     const users = await db.user.findMany({ where: { monetizeFlag: false } });
@@ -433,7 +443,7 @@ cron.schedule('0 0 *', async () => {
   }
 });
 
-// ========== DELETE CRON 3am v4.5 ==========
+// 15-day auto delete 3am daily
 cron.schedule('0 3 *', async () => {
   const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
   const clusters = [
@@ -444,7 +454,7 @@ cron.schedule('0 3 *', async () => {
   for (const c of clusters) {
     const posts = await c.db.post.findMany({ where: { createdAt: { lt: cutoff } });
     for (const p of posts) {
-      await c.b2.send(new (require('@aws-sdk/client-s3').DeleteObjectCommand)({ Bucket: c.bucket, Key: p.mediaUrl }));
+      await c.b2.send(new DeleteObjectCommand({ Bucket: c.bucket, Key: p.mediaUrl })).catch(() => {});
     }
     await c.db.post.deleteMany({ where: { createdAt: { lt: cutoff } });
   }
