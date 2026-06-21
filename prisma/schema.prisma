@@ -2,160 +2,129 @@ generator client {
   provider = "prisma-client-js"
 }
 
-datasource db1 {
+datasource db {
   provider = "postgresql"
-  url = env("DATABASE_URL1")
+  url = env("DATABASE_URL")
 }
 
-datasource db2 {
-  provider = "postgresql"
-  url = env("DATABASE_URL2")
-}
-
-datasource db3 {
-  provider = "postgresql"
-  url = env("DATABASE_URL3")
-}
-
-// ========== DB1: users, posts, follows ==========
 model User {
-  id Int @id @default(autoincrement())
+  id String @id @default(cuid())
+  username String @unique
   email String @unique
   password String
-  username String @unique
-  createdAt DateTime @default(now())
-  monetizedAt DateTime?
-  freeFarmingStopped Boolean @default(false)
-  freeCredits Float @default(1500)
+  freeCredits Float @default(1500) // v4.5: 1500 signup bonus
   cashBalance Float @default(0)
-  referralCount Int @default(0)
-  posts_count Int @default(0)
-  followers_count Int @default(0)
-  following_count Int @default(0)
+  monetizeFlag Boolean @default(false) // v4.5: Day 7 + 5 refs unlock
+  freeFarmingStopped Boolean @default(false) // Stop free credits after monetize
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  posts Media_post[]
-  comments Comment[]
-  likes Like[]
-  pointsLedger PointsLedger[]
+  posts Post[]
   stories Story[]
   chapters Chapter[]
+  pointsLedger PointsLedger[]
+  referralsSent Referral[] @relation("Referrer")
+  referralsReceived Referral[] @relation("Referee")
+  payoutQueue PayoutQueue[]
 
   @@map("users")
-  @@datasource(name: "db", url: env("DATABASE_URL1"))
 }
 
-model Media_post {
-  id Int @id @default(autoincrement())
-  userId Int
-  type String // video, image, text
-  caption String?
-  b2Key String?
-  b2Shard Int // 0,1,2 for B2_A/B/C routing
-  status String @default("pending") // pending, approved, rejected
+model Post {
+  id String @id @default(cuid())
+  userId String
+  mediaUrl String // B2 key: media/xxx.mp4
+  status String @default("PENDING_WORKER") // PENDING_WORKER, ACTIVE, REJECTED
+  b2Shard Int // 0, 1, 2 for B2 A/B/C tracking
   createdAt DateTime @default(now())
 
-  user User @relation(fields: [userId], references: [id])
-  likes Like[]
-  comments Comment[]
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@map("media_posts")
-  @@datasource(name: "db", url: env("DATABASE_URL1"))
-}
-
-model Follow {
-  id Int @id @default(autoincrement())
-  followerId Int
-  followingId Int
-  createdAt DateTime @default(now())
-
-  @@unique([followerId, followingId])
-  @@map("follows")
-  @@datasource(name: "db", url: env("DATABASE_URL1"))
-}
-
-// ========== DB2: likes, comments, referrals, stories ==========
-model Like {
-  id Int @id @default(autoincrement())
-  postId Int
-  userId Int
-  createdAt DateTime @default(now())
-
-  post Media_post @relation(fields: [postId], references: [id])
-  user User @relation(fields: [userId], references: [id])
-
-  @@unique([postId, userId])
-  @@map("likes")
-  @@datasource(name: "db", url: env("DATABASE_URL2"))
-}
-
-model Comment {
-  id Int @id @default(autoincrement())
-  postId Int
-  userId Int
-  text String
-  createdAt DateTime @default(now())
-
-  post Media_post @relation(fields: [postId], references: [id])
-  user User @relation(fields: [userId], references: [id])
-
-  @@map("comments")
-  @@datasource(name: "db", url: env("DATABASE_URL2"))
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("posts")
 }
 
 model Story {
-  id Int @id @default(autoincrement())
-  userId Int
+  id String @id @default(cuid())
+  userId String
   title String
   description String?
-  type String @default("story") // story, novel
+  coverUrl String?
+  status String @default("ACTIVE")
   createdAt DateTime @default(now())
 
-  user User @relation(fields: [userId], references: [id])
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   chapters Chapter[]
 
+  @@index([userId])
   @@map("stories")
-  @@datasource(name: "db", url: env("DATABASE_URL2"))
 }
 
 model Chapter {
-  id Int @id @default(autoincrement())
-  storyId Int
-  userId Int
+  id String @id @default(cuid())
+  storyId String
+  userId String
+  chapterNo Int
   title String
-  content String
-  chapterNumber Int
+  content String @db.Text // Story text
   createdAt DateTime @default(now())
 
-  story Story @relation(fields: [storyId], references: [id])
-  user User @relation(fields: [userId], references: [id])
+  story Story @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@unique([storyId, chapterNo])
+  @@index([userId])
   @@map("chapters")
-  @@datasource(name: "db", url: env("DATABASE_URL2"))
+}
+
+model PointsLedger {
+  id String @id @default(cuid())
+  userId String
+  amount Float // Can be 0.5 for views
+  type String // FREE or CASH
+  action String // LIKE, COMMENT, VIEW_REEL, READ_STORY, READ_NOVEL, REFERRAL_BONUS
+  referenceId String // postId or chapterId
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("points_ledger")
 }
 
 model Referral {
-  id Int @id @default(autoincrement())
-  referrerId Int
-  referredId Int
+  id String @id @default(cuid())
+  referrerId String
+  refereeId String @unique
+  status String @default("PENDING") // PENDING, QUALIFIED
   createdAt DateTime @default(now())
-  completed Boolean @default(false) // true when ref hits 1000pts
 
-  @@unique([referrerId, referredId])
+  referrer User @relation("Referrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referee User @relation("Referee", fields: [refereeId], references: [id], onDelete: Cascade)
+
+  @@index([referrerId])
+  @@index([status])
   @@map("referrals")
-  @@datasource(name: "db", url: env("DATABASE_URL2"))
 }
 
-// ========== DB3: points ledger only ==========
-model PointsLedger {
-  id Int @id @default(autoincrement())
-  userId Int
-  amount Float
-  type String // view, like, comment, read_chapter, read_story, referral, deposit
-  walletType String // free, cash
+model PayoutQueue {
+  id String @id @default(cuid())
+  userId String
+  amountPoints Float // Points requested
+  fiatValue Float // amountPoints * 0.1 = NGN
+  method String // Bank, USDT, etc
+  target String // Account details JSON
+  status String @default("PENDING") // PENDING, APPROVED, REJECTED
+  reason String? // Rejection reason
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id])
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@map("points_ledger")
-  @@datasource(name: "db", url: env("DATABASE_URL3"))
+  @@index([userId])
+  @@index([status])
+  @@map("payout_queue")
 }
