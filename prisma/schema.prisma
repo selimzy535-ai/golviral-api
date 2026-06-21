@@ -1,130 +1,113 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL") // Express overrides this at runtime using DATABASE_URL_1, _2, _3
+}
+
 generator client {
   provider = "prisma-client-js"
 }
 
-datasource db {
-  provider = "postgresql"
-  url = env("DATABASE_URL")
+enum WalletType {
+  FREE
+  CASH
+}
+
+enum ActionType {
+  LIKE
+  COMMENT
+  VIEW_REEL
+  READ_NOVEL
+  READ_STORY
+  REFERRAL_BONUS
+}
+
+enum Status {
+  PENDING
+  QUALIFIED
+  APPROVED
+  REJECTED
+  ACTIVE
+  PENDING_WORKER
 }
 
 model User {
-  id String @id @default(cuid())
-  username String @unique
-  email String @unique
-  password String
-  freeCredits Float @default(1500) // v4.5: 1500 signup bonus
-  cashBalance Float @default(0)
-  monetizeFlag Boolean @default(false) // v4.5: Day 7 + 5 refs unlock
-  freeFarmingStopped Boolean @default(false) // Stop free credits after monetize
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                 String         @id // Generated as hex via crypto.randomBytes(8)
+  username           String
+  email              String         @unique
+  password           String
+  freeCredits        Float          @default(1500)
+  cashBalance        Float          @default(0)
+  monetizeFlag       Boolean        @default(false)
+  freeFarmingStopped Boolean        @default(false)
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  
+  // Relations
+  posts              Post[]
+  pointsLedger       PointsLedger[]
+  payouts            PayoutQueue[]
+  referralsAsReferrer Referral[]    @relation("ReferrerRelation")
+  referralsAsReferee  Referral[]    @relation("RefereeRelation")
 
-  posts Post[]
-  stories Story[]
-  chapters Chapter[]
-  pointsLedger PointsLedger[]
-  referralsSent Referral[] @relation("Referrer")
-  referralsReceived Referral[] @relation("Referee")
-  payoutQueue PayoutQueue[]
-
-  @@map("users")
+  @@index([email])
 }
 
 model Post {
-  id String @id @default(cuid())
-  userId String
-  mediaUrl String // B2 key: media/xxx.mp4
-  status String @default("PENDING_WORKER") // PENDING_WORKER, ACTIVE, REJECTED
-  b2Shard Int // 0, 1, 2 for B2 A/B/C tracking
-  createdAt DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([status])
-  @@index([createdAt])
-  @@map("posts")
-}
-
-model Story {
-  id String @id @default(cuid())
-  userId String
-  title String
-  description String?
-  coverUrl String?
-  status String @default("ACTIVE")
-  createdAt DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  chapters Chapter[]
-
-  @@index([userId])
-  @@map("stories")
-}
-
-model Chapter {
-  id String @id @default(cuid())
-  storyId String
-  userId String
-  chapterNo Int
-  title String
-  content String @db.Text // Story text
-  createdAt DateTime @default(now())
-
-  story Story @relation(fields: [storyId], references: [id], onDelete: Cascade)
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([storyId, chapterNo])
-  @@index([userId])
-  @@map("chapters")
-}
-
-model PointsLedger {
-  id String @id @default(cuid())
-  userId String
-  amount Float // Can be 0.5 for views
-  type String // FREE or CASH
-  action String // LIKE, COMMENT, VIEW_REEL, READ_STORY, READ_NOVEL, REFERRAL_BONUS
-  referenceId String // postId or chapterId
-  createdAt DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([createdAt])
-  @@map("points_ledger")
-}
-
-model Referral {
-  id String @id @default(cuid())
-  referrerId String
-  refereeId String @unique
-  status String @default("PENDING") // PENDING, QUALIFIED
-  createdAt DateTime @default(now())
-
-  referrer User @relation("Referrer", fields: [referrerId], references: [id], onDelete: Cascade)
-  referee User @relation("Referee", fields: [refereeId], references: [id], onDelete: Cascade)
-
-  @@index([referrerId])
-  @@index([status])
-  @@map("referrals")
-}
-
-model PayoutQueue {
-  id String @id @default(cuid())
-  userId String
-  amountPoints Float // Points requested
-  fiatValue Float // amountPoints * 0.1 = NGN
-  method String // Bank, USDT, etc
-  target String // Account details JSON
-  status String @default("PENDING") // PENDING, APPROVED, REJECTED
-  reason String? // Rejection reason
+  id        String   @id // Generated as hex via crypto.randomBytes(8)
+  userId    String
+  mediaUrl  String // Maps to the B2 Object Key
+  status    Status   @default(PENDING_WORKER)
+  b2Shard   Int // Tracks getShardIndex(postId)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Relations
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([createdAt]) // Used by the 15-day auto-delete cron
+}
+
+model PointsLedger {
+  id          String     @id @default(uuid())
+  userId      String
+  amount      Float
+  type        WalletType
+  action      ActionType
+  referenceId String     @default("") // Holds postId or contentId
+  createdAt   DateTime   @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Referral {
+  id         String   @id @default(uuid())
+  referrerId String
+  refereeId  String   @unique
+  status     Status   @default(PENDING)
+  createdAt  DateTime @default(now())
+
+  // Relations
+  referrer User @relation("ReferrerRelation", fields: [referrerId], references: [id], onDelete: Cascade)
+  referee  User @relation("RefereeRelation", fields: [refereeId], references: [id], onDelete: Cascade)
+
+  @@index([referrerId, status])
+}
+
+model PayoutQueue {
+  id           String   @id @default(uuid())
+  userId       String
+  amountPoints Float
+  status       Status   @default(PENDING)
+  reason       String? // Populated on rejection
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([status])
-  @@map("payout_queue")
 }
