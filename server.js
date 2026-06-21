@@ -26,9 +26,9 @@ const APP_BASE_URL = process.env.APP_BASE_URL || 'https://v45-reels-app.pwa';
 
 // ========== 3x SHARDING CLIENTS ==========
 const prismaClients = {
-  db1: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_1 } }),
-  db2: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_2 } }),
-  db3: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_3 } }),
+  db1: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_1 } } }),
+  db2: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_2 } } }),
+  db3: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_3 } } }),
 };
 
 const redisClients = {
@@ -278,7 +278,7 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     const postsToday = parseInt(await redis.get(postsKey) || '0');
     if (postsToday >= 3) return res.status(429).json({ error: '3 posts/day limit' });
 
-    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: 25 } });
+    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: 25 } } });
 
     const postId = crypto.randomBytes(8).toString('hex');
     const b2 = getB2Shard(postId);
@@ -309,7 +309,7 @@ app.post('/api/worker/callback', async (req, res) => {
     const redis = getRedisShard(userId);
     await redis.set(`lock:${userId}`, '1', 'EX', 2, 'NX');
     await db.client.$transaction([
-      db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: 25 } }),
+      db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: 25 } } }),
       db.client.post.update({ where: { id: postId }, data: { status: 'REJECTED' } })
     ]);
     await redis.del(`lock:${userId}`);
@@ -327,12 +327,12 @@ app.post('/api/view', (req, res) => {
 });
 
 app.post('/api/interact', authenticateToken, (req, res) => {
-  interactionBuffer.push({...req.body, actorId: req.userId, timestamp: Date.now() });
+  interactionBuffer.push({...req.body, actorId: req.user.userId, timestamp: Date.now() });
   res.status(202).json({ buffered: true });
 });
 
 app.post('/api/read-session', authenticateToken, (req, res) => {
-  interactionBuffer.push({...req.body, userId: req.userId, type: 'READ', timestamp: Date.now() });
+  interactionBuffer.push({...req.body, userId: req.user.userId, type: 'READ', timestamp: Date.now() });
   res.status(202).json({ buffered: true });
 });
 
@@ -387,7 +387,7 @@ app.post('/api/admin/payouts/reject', verifyAdminKey, async (req, res) => {
   if (!payout) return res.status(404).json({ error: 'Payout not found' });
 
   await db.client.$transaction([
-    db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } }),
+    db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } } }),
     db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'REJECTED', reason } })
   ]);
 
@@ -398,7 +398,7 @@ app.post('/api/admin/payouts/reject', verifyAdminKey, async (req, res) => {
 
 // ========== CRONS v4.5 ==========
 // 10s buffer processor
-cron.schedule('*/10 *', async () => {
+cron.schedule('*/10 * * * * *', async () => {
   if (interactionBuffer.length === 0) return;
   const batch = [...interactionBuffer];
   interactionBuffer = [];
@@ -429,7 +429,7 @@ cron.schedule('*/10 *', async () => {
 });
 
 // Monetize unlock 12am daily
-cron.schedule('0 0 *', async () => {
+cron.schedule('0 0 * * *', async () => {
   for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
     const users = await db.user.findMany({ where: { monetizeFlag: false } });
     for (const user of users) {
@@ -444,7 +444,7 @@ cron.schedule('0 0 *', async () => {
 });
 
 // 15-day auto delete 3am daily
-cron.schedule('0 3 *', async () => {
+cron.schedule('0 3 * * *', async () => {
   const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
   const clusters = [
     { db: prismaClients.db1, b2: b2Clients.b2a, bucket: process.env.B2_BUCKET_A },
@@ -452,11 +452,11 @@ cron.schedule('0 3 *', async () => {
     { db: prismaClients.db3, b2: b2Clients.b2c, bucket: process.env.B2_BUCKET_C }
   ];
   for (const c of clusters) {
-    const posts = await c.db.post.findMany({ where: { createdAt: { lt: cutoff } });
+    const posts = await c.db.post.findMany({ where: { createdAt: { lt: cutoff } } });
     for (const p of posts) {
       await c.b2.send(new DeleteObjectCommand({ Bucket: c.bucket, Key: p.mediaUrl })).catch(() => {});
     }
-    await c.db.post.deleteMany({ where: { createdAt: { lt: cutoff } });
+    await c.db.post.deleteMany({ where: { createdAt: { lt: cutoff } } });
   }
 });
 
