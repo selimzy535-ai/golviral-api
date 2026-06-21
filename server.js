@@ -398,7 +398,7 @@ app.post('/api/admin/payouts/reject', verifyAdminKey, async (req, res) => {
 
 // ========== CRONS v4.5 ==========
 // 10s buffer processor
-cron.schedule('*/10 * * * * *', async () => {
+cron.schedule('*/10 *', async () => {
   if (interactionBuffer.length === 0) return;
   const batch = [...interactionBuffer];
   interactionBuffer = [];
