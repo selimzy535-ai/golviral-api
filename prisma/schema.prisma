@@ -1,3 +1,7 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
 datasource db1 {
   provider = "postgresql"
   url = env("DATABASE_URL1")
@@ -13,108 +17,49 @@ datasource db3 {
   url = env("DATABASE_URL3")
 }
 
-generator client {
-  provider = "prisma-client-js"
-}
-
+// ========== DB1: users, posts, follows ==========
 model User {
   id Int @id @default(autoincrement())
-  username String @unique
   email String @unique
   password String
-  freeCredits Int @default(1500)
+  username String @unique
+  createdAt DateTime @default(now())
   monetizedAt DateTime?
   freeFarmingStopped Boolean @default(false)
-  createdAt DateTime @default(now())
+  freeCredits Float @default(1500)
+  cashBalance Float @default(0)
+  referralCount Int @default(0)
+  posts_count Int @default(0)
+  followers_count Int @default(0)
+  following_count Int @default(0)
 
-  mediaPosts MediaPost[] @relation("UserPosts")
-  follows Follow[] @relation("Follower")
-  followers Follow[] @relation("Following")
+  posts Media_post[]
+  comments Comment[]
+  likes Like[]
+  pointsLedger PointsLedger[]
+  stories Story[]
+  chapters Chapter[]
 
   @@map("users")
-  @@schema("db1")
+  @@datasource(name: "db", url: env("DATABASE_URL1"))
 }
 
-model MediaPost {
+model Media_post {
   id Int @id @default(autoincrement())
   userId Int
-  type String // 'video' or 'image'
+  type String // video, image, text
   caption String?
-  b2Key String
-  thumbUrl String?
+  b2Key String?
+  b2Shard Int // 0,1,2 for B2_A/B/C routing
   status String @default("pending") // pending, approved, rejected
-  views Int @default(0)
-  likes Int @default(0)
-  comments Int @default(0)
   createdAt DateTime @default(now())
 
-  user User @relation("UserPosts", fields: [userId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+  likes Like[]
+  comments Comment[]
 
-  @@index([userId])
-  @@index([status])
   @@map("media_posts")
-  @@schema("db1")
-}
-
-model Like {
-  id Int @id @default(autoincrement())
-  userId Int
-  postId Int
-  createdAt DateTime @default(now())
-
-  @@unique([userId, postId])
-  @@index([postId])
-  @@map("likes")
-  @@schema("db2")
-}
-
-model Comment {
-  id Int @id @default(autoincrement())
-  userId Int
-  postId Int
-  text String
-  createdAt DateTime @default(now())
-
-  @@index([postId])
-  @@map("comments")
-  @@schema("db2")
-}
-
-model Referral {
-  id Int @id @default(autoincrement())
-  referrerId Int
-  referredId Int
-  createdAt DateTime @default(now())
-
-  @@index([referrerId])
-  @@map("referrals")
-  @@schema("db2")
-}
-
-model ViewLog {
-  id Int @id @default(autoincrement())
-  postId Int
-  viewerId Int
-  createdAt DateTime @default(now())
-
-  @@unique([postId, viewerId])
-  @@index([postId])
-  @@map("view_logs")
-  @@schema("db2")
-}
-
-model PointsLedger {
-  id Int @id @default(autoincrement())
-  userId Int
-  amount Float
-  type String // 'free' or 'cash'
-  reason String // 'view', 'like', 'comment', 'post_fee', 'withdraw'
-  createdAt DateTime @default(now())
-
-  @@index([userId])
-  @@index([type])
-  @@map("points_ledger")
-  @@schema("db3")
+  @@datasource(name: "db", url: env("DATABASE_URL1"))
 }
 
 model Follow {
@@ -123,10 +68,94 @@ model Follow {
   followingId Int
   createdAt DateTime @default(now())
 
-  follower User @relation("Follower", fields: [followerId], references: [id])
-  following User @relation("Following", fields: [followingId], references: [id])
-
   @@unique([followerId, followingId])
   @@map("follows")
-  @@schema("db1")
+  @@datasource(name: "db", url: env("DATABASE_URL1"))
+}
+
+// ========== DB2: likes, comments, referrals, stories ==========
+model Like {
+  id Int @id @default(autoincrement())
+  postId Int
+  userId Int
+  createdAt DateTime @default(now())
+
+  post Media_post @relation(fields: [postId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([postId, userId])
+  @@map("likes")
+  @@datasource(name: "db", url: env("DATABASE_URL2"))
+}
+
+model Comment {
+  id Int @id @default(autoincrement())
+  postId Int
+  userId Int
+  text String
+  createdAt DateTime @default(now())
+
+  post Media_post @relation(fields: [postId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("comments")
+  @@datasource(name: "db", url: env("DATABASE_URL2"))
+}
+
+model Story {
+  id Int @id @default(autoincrement())
+  userId Int
+  title String
+  description String?
+  type String @default("story") // story, novel
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+  chapters Chapter[]
+
+  @@map("stories")
+  @@datasource(name: "db", url: env("DATABASE_URL2"))
+}
+
+model Chapter {
+  id Int @id @default(autoincrement())
+  storyId Int
+  userId Int
+  title String
+  content String
+  chapterNumber Int
+  createdAt DateTime @default(now())
+
+  story Story @relation(fields: [storyId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("chapters")
+  @@datasource(name: "db", url: env("DATABASE_URL2"))
+}
+
+model Referral {
+  id Int @id @default(autoincrement())
+  referrerId Int
+  referredId Int
+  createdAt DateTime @default(now())
+  completed Boolean @default(false) // true when ref hits 1000pts
+
+  @@unique([referrerId, referredId])
+  @@map("referrals")
+  @@datasource(name: "db", url: env("DATABASE_URL2"))
+}
+
+// ========== DB3: points ledger only ==========
+model PointsLedger {
+  id Int @id @default(autoincrement())
+  userId Int
+  amount Float
+  type String // view, like, comment, read_chapter, read_story, referral, deposit
+  walletType String // free, cash
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("points_ledger")
+  @@datasource(name: "db", url: env("DATABASE_URL3"))
 }
