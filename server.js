@@ -31,12 +31,19 @@ const prismaClients = {
   db3: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_3 || "postgresql://mock:fallback@localhost:5432/db3" } } }),
 };
 
+// ========== 3x REDIS CLIENTS ==========
 const redisClients = {
-  redis1: new Redis(process.env.REDIS_URL_1),
-  redis2: new Redis(process.env.REDIS_URL_2),
-  redis3: new Redis(process.env.REDIS_URL_3),
+  redis1: new Redis(process.env.REDIS_URL_1 || 'redis://127.0.0.1:6379'),
+  redis2: new Redis(process.env.REDIS_URL_2 || 'redis://127.0.0.1:6379'),
+  redis3: new Redis(process.env.REDIS_URL_3 || 'redis://127.0.0.1:6379'),
 };
 
+// Catch and handle background connection errors gracefully
+Object.entries(redisClients).forEach(([shardName, client]) => {
+  client.on('error', (err) => {
+    console.error(`[Redis Error] Shard ${shardName} connection failed:`, err.message);
+  });
+});
 const b2Clients = {
   b2a: new S3Client({ endpoint: process.env.B2_ENDPOINT_A, credentials: { accessKeyId: process.env.B2_KEY_ID_A, secretAccessKey: process.env.B2_APPLICATION_KEY_A }, region: process.env.B2_REGION_A }),
   b2b: new S3Client({ endpoint: process.env.B2_ENDPOINT_B, credentials: { accessKeyId: process.env.B2_KEY_ID_B, secretAccessKey: process.env.B2_APPLICATION_KEY_B }, region: process.env.B2_REGION_B }),
