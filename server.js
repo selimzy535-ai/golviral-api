@@ -197,7 +197,15 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
     await redis.del(`lock:${userId}`);
   }
 }
-
+// Base Gateway Root Route
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: "online",
+    platform: "GolViral API Gateway",
+    version: "4.5",
+    timestamp: new Date()
+  });
+});
 // ========== AUTH ROUTES ==========
 app.post('/api/auth/signup', verifyTurnstile, async (req, res) => {
   const { username, email, password, referralCode } = req.body;
