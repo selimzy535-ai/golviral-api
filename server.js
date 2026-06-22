@@ -22,7 +22,7 @@ app.use(morgan('combined'));
 
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_shard_key_2026';
-const APP_BASE_URL = process.env.APP_BASE_URL || 'https://v45-reels-app.pwa';
+const APP_BASE_URL = process.env.APP_BASE_URL || 'https://golviral-api.onrender.com';
 
 // ========== 3x SHARDING CLIENTS ==========
 const prismaClients = {
