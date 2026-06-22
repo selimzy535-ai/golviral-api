@@ -165,7 +165,7 @@ async function sendEmail(to, subject, html) {
 // ========== MEMORY RESILIENT MATH BOT STACK ENGINE ==========
 app.post('/api/bot-challenge', async (req, res) => {
   try {
-    const ops = ['+', '-', *' === '*' ? '+' : '*']; // Protect operators bounds
+    const ops = ['+', '-', '*']; 
     const op = ops[Math.floor(Math.random() * 3)] || '+';
     const a = Math.floor(Math.random() * 10) + 1;
     const b = Math.floor(Math.random() * 10) + 1;
@@ -585,7 +585,6 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
       throw new Error('Size threshold check parameters completely violated');
     }
 
-    // Extract frame with ffmpeg CLI gracefully caught if missing internally
     await new Promise((resolve, reject) => {
       exec(`ffmpeg -ss 00:00:01 -i ${localVideoPath} -vframes 1 -q:v 2 ${localThumbPath}`, (err) => {
         if (err) {
@@ -604,7 +603,6 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
       })).catch(() => console.error('[Storage Error] Thumbnail transmission framework block bypassed'));
     }
 
-    // Generate permanent links maps safely
     const finalCmdVideo = new GetObjectCommand({ Bucket: b2.bucket, Key: objectKey });
     const finalCmdThumb = new GetObjectCommand({ Bucket: b2.bucket, Key: thumbKey });
     
@@ -846,7 +844,7 @@ cron.schedule('*/10 * * * * *', async () => {
       }
     } catch (e) {
       console.error('[Cron Buffer Warning - Data Re-queued]', e.message);
-      interactionBuffer.unshift(item); // Safe recovery mechanism ensures zero metrics loss
+      interactionBuffer.unshift(item); 
     }
   }
 });
