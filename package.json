@@ -1,24 +1,31 @@
 {
-  "name": "v45-reels-app-backend",
+  "name": "golviral-api-gateway",
   "version": "4.5.0",
-  "description": "Sharded production backend optimized for deployment on Render",
+  "description": "High-availability, fault-tolerant sharded API gateway engine for GolViral.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "render:build": "npm install"
+    "prisma:generate": "prisma generate"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "express",
+    "prisma",
+    "sharding",
+    "redis",
+    "aws-sdk",
+    "backblaze",
+    "fail-safe"
+  ],
+  "author": "GolViral Core Team",
   "license": "ISC",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
     "@aws-sdk/s3-request-presigner": "^3.600.0",
-    "@prisma/client": "^5.16.0",
-    "axios": "^1.7.0",
+    "@prisma/client": "^5.15.0",
+    "axios": "^1.7.2",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
-    "crypto": "^1.0.1",
     "express": "^4.19.2",
     "helmet": "^7.1.0",
     "ioredis": "^5.4.1",
@@ -28,7 +35,8 @@
     "nodemailer": "^6.9.14"
   },
   "devDependencies": {
-    "nodemon": "^3.1.4"
+    "nodemon": "^3.1.4",
+    "prisma": "^5.15.0"
   },
   "engines": {
     "node": ">=18.0.0"
