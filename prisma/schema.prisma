@@ -1,113 +1,82 @@
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL") // Express overrides this at runtime using DATABASE_URL_1, _2, _3
+  url      = env("DATABASE_URL")
 }
 
 generator client {
   provider = "prisma-client-js"
 }
 
-enum WalletType {
-  FREE
-  CASH
-}
-
-enum ActionType {
-  LIKE
-  COMMENT
-  VIEW_REEL
-  READ_NOVEL
-  READ_STORY
-  REFERRAL_BONUS
-}
-
-enum Status {
-  PENDING
-  QUALIFIED
-  APPROVED
-  REJECTED
-  ACTIVE
-  PENDING_WORKER
-}
-
 model User {
-  id                 String         @id // Generated as hex via crypto.randomBytes(8)
-  username           String
-  email              String         @unique
-  password           String
+  id                 String         @id @db.VarChar(16)
+  username           String         @unique @db.VarChar(50)
+  email              String         @unique @db.VarChar(100)
+  password           String         @db.VarChar(255)
   freeCredits        Float          @default(1500)
   cashBalance        Float          @default(0)
   monetizeFlag       Boolean        @default(false)
   freeFarmingStopped Boolean        @default(false)
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
-  
-  // Relations
   posts              Post[]
-  pointsLedger       PointsLedger[]
+  ledgers            PointsLedger[]
   payouts            PayoutQueue[]
-  referralsAsReferrer Referral[]    @relation("ReferrerRelation")
-  referralsAsReferee  Referral[]    @relation("RefereeRelation")
 
   @@index([email])
+  @@index([monetizeFlag])
 }
 
 model Post {
-  id        String   @id // Generated as hex via crypto.randomBytes(8)
-  userId    String
-  mediaUrl  String // Maps to the B2 Object Key
-  status    Status   @default(PENDING_WORKER)
-  b2Shard   Int // Tracks getShardIndex(postId)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relations
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           String   @id @db.VarChar(16)
+  userId       String   @db.VarChar(16)
+  mediaUrl     String   @db.Text
+  thumbnailUrl String   @db.Text
+  status       String   @db.VarChar(20) // PRE_UPLOAD, ACTIVE, REJECTED
+  b2Shard      Int      @default(0)
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
-  @@index([createdAt]) // Used by the 15-day auto-delete cron
+  @@index([status])
+  @@index([createdAt])
 }
 
 model PointsLedger {
-  id          String     @id @default(uuid())
-  userId      String
+  id          Int      @id @default(autoincrement())
+  userId      String   @db.VarChar(16)
   amount      Float
-  type        WalletType
-  action      ActionType
-  referenceId String     @default("") // Holds postId or contentId
-  createdAt   DateTime   @default(now())
-
-  // Relations
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type        String   @db.VarChar(10) // FREE, CASH
+  action      String   @db.VarChar(30) // LIKE, COMMENT, VIEW_REEL, READ_NOVEL, etc.
+  referenceId String   @db.VarChar(64)
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([createdAt])
 }
 
 model Referral {
   id         String   @id @default(uuid())
-  referrerId String
-  refereeId  String   @unique
-  status     Status   @default(PENDING)
+  referrerId String   @db.VarChar(16)
+  refereeId  String   @unique @db.VarChar(16)
+  status     String   @db.VarChar(20) // PENDING, QUALIFIED
   createdAt  DateTime @default(now())
 
-  // Relations
-  referrer User @relation("ReferrerRelation", fields: [referrerId], references: [id], onDelete: Cascade)
-  referee  User @relation("RefereeRelation", fields: [refereeId], references: [id], onDelete: Cascade)
-
-  @@index([referrerId, status])
+  @@index([referrerId])
+  @@index([status])
 }
 
 model PayoutQueue {
-  id           String   @id @default(uuid())
-  userId       String
-  amountPoints Float
-  status       Status   @default(PENDING)
-  reason       String? // Populated on rejection
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id            String   @id @db.VarChar(16)
+  userId        String   @db.VarChar(16)
+  amountPoints  Float
+  routingTarget String   @db.VarChar(50)
+  targetDetails String   @db.Text
+  status        String   @db.VarChar(20) // PENDING, APPROVED, REJECTED
+  reason        String?  @db.Text
+  createdAt     DateTime @default(now())
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // Relations
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
+  @@index([userId])
   @@index([status])
 }
