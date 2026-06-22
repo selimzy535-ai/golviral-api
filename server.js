@@ -31,11 +31,19 @@ const prismaClients = {
   db3: new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_3 || "postgresql://mock:fallback@localhost:5432/db3" } } }),
 };
 
-// ========== 3x REDIS CLIENTS ==========
+// ========== 3x REDIS CLIENTS (ULTRA-SAFE FALLBACK) ==========
+const primaryRedisUrl = process.env.REDIS_URL_1 && process.env.REDIS_URL_1.trim() 
+  ? process.env.REDIS_URL_1 
+  : 'redis://127.0.0.1:6379';
+
+// Explicitly check if strings are valid, otherwise forcefully clamp to primary
+const r2Url = process.env.REDIS_URL_2 && process.env.REDIS_URL_2.trim() ? process.env.REDIS_URL_2 : primaryRedisUrl;
+const r3Url = process.env.REDIS_URL_3 && process.env.REDIS_URL_3.trim() ? process.env.REDIS_URL_3 : primaryRedisUrl;
+
 const redisClients = {
-  redis1: new Redis(process.env.REDIS_URL_1 || 'redis://127.0.0.1:6379'),
-  redis2: new Redis(process.env.REDIS_URL_2 || 'redis://127.0.0.1:6379'),
-  redis3: new Redis(process.env.REDIS_URL_3 || 'redis://127.0.0.1:6379'),
+  redis1: new Redis(primaryRedisUrl),
+  redis2: new Redis(r2Url),
+  redis3: new Redis(r3Url),
 };
 
 // Catch and handle background connection errors gracefully
