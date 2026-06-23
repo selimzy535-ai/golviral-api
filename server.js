@@ -17,15 +17,44 @@ const fs = require('fs');
 const path = require('path');
 
 // ========== INIT & SECURITY OVERRIDES ==========
+// ========== INIT & SECURITY OVERRIDES ==========
 const app = express();
+
+// Body parser - 50MB for video uploads
 app.use(express.json({ limit: '50mb' }));
-app.use(cors({ origin: 'https://golviral.com' }));
+
+// CORS - Allow GitHub Pages + Custom Domain
+const allowedOrigins = [
+  'https://selimzy535-ai.github.io',
+  'https://golviral.com'
+];
+
+app.use(cors({ 
+  origin: (origin, callback) => {
+    // Allow requests with no origin like Postman/cURL
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('CORS blocked: ' + origin));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(helmet());
 app.use(morgan('combined'));
 
+// ========== ENV CONFIG ==========
 const PORT = process.env.PORT || 10000;
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
-const APP_BASE_URL = process.env.APPBASEURL || 'https://golviral.com';
+
+// APP_BASE_URL - Use GitHub Pages until domain bought
+const APP_BASE_URL = process.env.APPBASEURL || 'https://selimzy535-ai.github.io/golviral-frontend';
+
+console.log(`[INIT] GolViral v4.5 Hardened Core Stack Engine...`);
+console.log(`[CONFIG] APP_BASE_URL: ${APP_BASE_URL}`);
 
 console.log(`[INIT] Initializing GolViral v4.5 Hardened Core Stack Engine...`);
 
