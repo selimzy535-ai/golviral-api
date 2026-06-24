@@ -665,15 +665,15 @@ app.get('/api/feed', async (req, res) => {
     try {
       const posts = await db.post.findMany({
         where: { status: 'ACTIVE' },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { score: 'desc' }, // rank by viral score
         take: 12
       });
       feed.push(...posts);
     } catch (dbErr) {
-      console.error('[Feed Shard Intercepted Recovery Block Active]', dbErr.message);
+      console.error('[Feed Shard Intercepted]', dbErr.message);
     }
   }
-  feed.sort((a, b) => b.createdAt - a.createdAt);
+  feed.sort((a, b) => b.score - a.score); 
   res.json(feed.slice(0, 20));
 });
 
@@ -939,7 +939,21 @@ cron.schedule('0 3 * * *', async () => {
     }
   }
 });
-
+cron.schedule('*/5 * * * *', async () => {
+  const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+  for (const db of targets) {
+    try {
+      const posts = await db.post.findMany({ where: { status: 'ACTIVE' } });
+      for (const p of posts) {
+        const hoursOld = (Date.now() - new Date(p.createdAt)) / 1000 / 3600;
+        const newScore = (p.likes * 2) + (p.comments * 3) + (p.views * 0.1) - (hoursOld * 0.5);
+        await db.post.update({ where: { id: p.id }, data: { score: newScore } });
+      }
+    } catch (e) {
+      console.error('[Score Cron Error]', e.message);
+    }
+  }
+});
 // ========== APP SYSTEM HEALTH ROOT CHECK UP ==========
 app.get('/', (req, res) => {
   res.status(200).json({ status: "online", core: "GolViral Hardened Engine Infrastructure Matrix", version: "4.5" });
