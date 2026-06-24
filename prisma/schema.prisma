@@ -1,6 +1,16 @@
-datasource db {
+datasource db1 {
   provider = "postgresql"
-  url = env("DATABASE_URL")
+  url = env("DATABASEURL1")
+}
+
+datasource db2 {
+  provider = "postgresql" 
+  url = env("DATABASEURL2")
+}
+
+datasource db3 {
+  provider = "postgresql"
+  url = env("DATABASEURL3")
 }
 
 generator client {
