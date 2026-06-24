@@ -851,15 +851,26 @@ cron.schedule('*/10 * * * * *', async () => {
 
   for (const item of batch) {
     try {
+      const db = getDbShard(item.userId);
+      
       if (item.type === 'VIEW') {
         const redis = getRedisShard(item.userId);
         const added = await redis.pfadd(`view:${item.postId}`, item.viewerId || item.viewerIp || 'anonymous_ip').catch(() => 1);
         if (added === 1) {
           await processWalletTransaction({ userId: item.userId, action: 'VIEW_REEL', isCreator: true, meta: { refId: item.postId } });
+          // ← ADD THIS: increment views counter
+          await db.client.post.update({ where: { id: item.postId }, data: { views: { increment: 1 } }).catch(() => {});
         }
-      } else if (item.type === 'LIKE' || item.type === 'COMMENT') {
-        await processWalletTransaction({ userId: item.userId, action: item.type, isCreator: true, meta: { refId: item.postId } });
-        await processWalletTransaction({ userId: item.actorId, action: item.type, isCreator: false, meta: { refId: item.postId } });
+      } else if (item.type === 'LIKE') {
+        await processWalletTransaction({ userId: item.userId, action: 'LIKE', isCreator: true, meta: { refId: item.postId } });
+        await processWalletTransaction({ userId: item.actorId, action: 'LIKE', isCreator: false, meta: { refId: item.postId } });
+        // ← ADD THIS: increment likes counter
+        await db.client.post.update({ where: { id: item.postId }, data: { likes: { increment: 1 } }).catch(() => {});
+      } else if (item.type === 'COMMENT') {
+        await processWalletTransaction({ userId: item.userId, action: 'COMMENT', isCreator: true, meta: { refId: item.postId } });
+        await processWalletTransaction({ userId: item.actorId, action: 'COMMENT', isCreator: false, meta: { refId: item.postId } });
+        // ← ADD THIS: increment comments counter
+        await db.client.post.update({ where: { id: item.postId }, data: { comments: { increment: 1 } }).catch(() => {});
       } else if (item.type === 'READ') {
         const redis = getRedisShard(item.userId);
         const coolKey = `cool:read:${item.userId}:${item.contentId}`;
@@ -877,7 +888,6 @@ cron.schedule('*/10 * * * * *', async () => {
     }
   }
 });
-
 cron.schedule('0 0 * * *', async () => {
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
   for (const db of targets) {
