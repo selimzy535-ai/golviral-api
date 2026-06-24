@@ -846,46 +846,79 @@ app.post('/api/admin/payouts/reject', async (req, res) => {
 // ========== MULTI-LAYER CRON FLUSHING LOOPS WITH ANTI-DATA LOSS PROTECTION ==========
 cron.schedule('*/10 * * * * *', async () => {
   if (interactionBuffer.length === 0) return;
+
+  // Shallow copy and clear the buffer atomically for this tick
   const batch = [...interactionBuffer];
   interactionBuffer = [];
+
+  const failedItems = [];
 
   for (const item of batch) {
     try {
       const db = getDbShard(item.userId);
-      
+
       if (item.type === 'VIEW') {
         const redis = getRedisShard(item.userId);
-        const added = await redis.pfadd(`view:${item.postId}`, item.viewerId || item.viewerIp || 'anonymous_ip').catch(() => 1);
+        const identity = item.viewerId || item.viewerIp || 'anonymous_ip';
+        
+        const added = await redis.pfadd(`view:${item.postId}`, identity).catch(() => 1);
         if (added === 1) {
-          await processWalletTransaction({ userId: item.userId, action: 'VIEW_REEL', isCreator: true, meta: { refId: item.postId } });
-          // ← ADD THIS: increment views counter
-          await db.client.post.update({ where: { id: item.postId }, data: { views: { increment: 1 } }).catch(() => {});
+          await processWalletTransaction({ 
+            userId: item.userId, 
+            action: 'VIEW_REEL', 
+            isCreator: true, 
+            meta: { refId: item.postId } 
+          });
+          
+          // Fixed missing parentheses
+          await db.client.post.update({ 
+            where: { id: item.postId }, 
+            data: { views: { increment: 1 } } 
+          }).catch(() => {});
         }
+
       } else if (item.type === 'LIKE') {
         await processWalletTransaction({ userId: item.userId, action: 'LIKE', isCreator: true, meta: { refId: item.postId } });
         await processWalletTransaction({ userId: item.actorId, action: 'LIKE', isCreator: false, meta: { refId: item.postId } });
-        // ← ADD THIS: increment likes counter
-        await db.client.post.update({ where: { id: item.postId }, data: { likes: { increment: 1 } }).catch(() => {});
+        
+        // Fixed missing parentheses
+        await db.client.post.update({ 
+          where: { id: item.postId }, 
+          data: { likes: { increment: 1 } } 
+        }).catch(() => {});
+
       } else if (item.type === 'COMMENT') {
         await processWalletTransaction({ userId: item.userId, action: 'COMMENT', isCreator: true, meta: { refId: item.postId } });
         await processWalletTransaction({ userId: item.actorId, action: 'COMMENT', isCreator: false, meta: { refId: item.postId } });
-        // ← ADD THIS: increment comments counter
-        await db.client.post.update({ where: { id: item.postId }, data: { comments: { increment: 1 } }).catch(() => {});
+        
+        // Fixed missing parentheses
+        await db.client.post.update({ 
+          where: { id: item.postId }, 
+          data: { comments: { increment: 1 } } 
+        }).catch(() => {});
+
       } else if (item.type === 'READ') {
         const redis = getRedisShard(item.userId);
         const coolKey = `cool:read:${item.userId}:${item.contentId}`;
         const cooled = await redis.get(coolKey).catch(() => null);
+
         if (!cooled) {
           const delay = item.contentType === 'NOVEL' ? 120 : 180;
           await redis.set(coolKey, '1', 'EX', delay).catch(() => {});
+          
           await processWalletTransaction({ userId: item.authorId, action: `READ_${item.contentType}`, isCreator: true, meta: { refId: item.contentId } });
           await processWalletTransaction({ userId: item.userId, action: `READ_${item.contentType}`, isCreator: false, meta: { refId: item.contentId } });
         }
       }
     } catch (e) {
-      console.error('[Cron Buffer Warning - Data Re-queued]', e.message);
-      interactionBuffer.unshift(item); 
+      console.error('[Cron Buffer Warning - Item marked for re-queue]', e.message);
+      failedItems.push(item);
     }
+  }
+
+  // Safely re-queue failed items back to the main buffer
+  if (failedItems.length > 0) {
+    interactionBuffer.unshift(...failedItems);
   }
 });
 cron.schedule('0 0 * * *', async () => {
