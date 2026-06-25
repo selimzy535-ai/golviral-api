@@ -2,44 +2,53 @@ generator client {
   provider = "prisma-client-js"
 }
 
-// Condense to one generic block using DATABASE_URL
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  url = env("DATABASE_URL")
 }
 
 model User {
-  id                 String         @id @db.VarChar(16)
-  username           String         @unique @db.VarChar(50)
-  email              String         @unique @db.VarChar(100)
-  password           String         @db.VarChar(255)
-  freeCredits        Float          @default(1500)
-  cashBalance        Float          @default(0)
-  monetizeFlag       Boolean        @default(false)
-  freeFarmingStopped Boolean        @default(false)
-  createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
-  posts              Post[]
-  ledgers            PointsLedger[]
-  payouts            PayoutQueue[]
+  id String @id @db.VarChar(16)
+  username String @unique @db.VarChar(50)
+  email String @unique @db.VarChar(100)
+  password String @db.VarChar(255)
+  freeCredits Float @default(1500)
+  cashBalance Float @default(0)
+  monetizeFlag Boolean @default(false)
+  freeFarmingStopped Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  posts Post[]
+  ledgers PointsLedger[]
+  payouts PayoutQueue[]
+
+  // Follow relations
+  followers Follow[] @relation("Followers")
+  following Follow[] @relation("Following")
+
+  // Referral relations
+  referralsMade Referral[] @relation("Referrer")
+  referralReceived Referral? @relation("Referee")
 
   @@index([email])
   @@index([monetizeFlag])
+  @@index([username])
 }
 
 model Post {
-  id           String   @id @db.VarChar(16)
-  userId       String   @db.VarChar(16)
-  mediaUrl     String   @db.Text
-  thumbnailUrl String   @db.Text
-  status       String   @db.VarChar(20) // PRE_UPLOAD, ACTIVE, REJECTED
-  b2Shard      Int      @default(0)
-  createdAt    DateTime @default(now())
+  id String @id @db.VarChar(16)
+  userId String @db.VarChar(16)
+  mediaUrl String @db.Text
+  thumbnailUrl String @db.Text
+  status String @db.VarChar(20) // PRE_UPLOAD, ACTIVE, REJECTED
+  b2Shard Int @default(0)
+  createdAt DateTime @default(now())
 
-  score    Float @default(0)
-  likes    Int   @db.Integer @default(0)
-  comments Int   @db.Integer @default(0)
-  views    Int   @db.Integer @default(0)
+  score Float @default(0)
+  likes Int @default(0)
+  comments Int @default(0)
+  views Int @default(0)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -50,41 +59,62 @@ model Post {
 }
 
 model PointsLedger {
-  id          Int      @id @default(autoincrement())
-  userId      String   @db.VarChar(16)
-  amount      Float
-  type        String   @db.VarChar(10) // FREE, CASH
-  action      String   @db.VarChar(30) // LIKE, COMMENT, VIEW_REEL, READ_NOVEL, etc.
-  referenceId String   @db.VarChar(64)
-  createdAt   DateTime @default(now())
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id Int @id @default(autoincrement())
+  userId String @db.VarChar(16)
+  amount Float
+  type String @db.VarChar(10) // FREE, CASH
+  action String @db.VarChar(30) // LIKE, COMMENT, VIEW_REEL, READ_NOVEL, etc.
+  referenceId String @db.VarChar(64)
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([createdAt])
+  @@index([action])
 }
 
 model Referral {
-  id         String   @id @default(uuid())
-  referrerId String   @db.VarChar(16)
-  refereeId  String   @unique @db.VarChar(16)
-  status     String   @db.VarChar(20) // PENDING, QUALIFIED
-  createdAt  DateTime @default(now())
+  id String @id @default(uuid())
+  referrerId String @db.VarChar(16)
+  refereeId String @unique @db.VarChar(16)
+  status String @db.VarChar(20) // PENDING, QUALIFIED
+  createdAt DateTime @default(now())
+
+  referrer User @relation("Referrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referee User @relation("Referee", fields: [refereeId], references: [id], onDelete: Cascade)
 
   @@index([referrerId])
   @@index([status])
+  @@index([createdAt])
 }
 
 model PayoutQueue {
-  id            String   @id @db.VarChar(16)
-  userId        String   @db.VarChar(16)
-  amountPoints  Float
-  routingTarget String   @db.VarChar(50)
-  targetDetails String   @db.Text
-  status        String   @db.VarChar(20) // PENDING, APPROVED, REJECTED
-  reason        String?  @db.Text
-  createdAt     DateTime @default(now())
-  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id String @id @db.VarChar(16)
+  userId String @db.VarChar(16)
+  amountPoints Float
+  routingTarget String @db.VarChar(50)
+  targetDetails String @db.Text
+  status String @db.VarChar(20) // PENDING, APPROVED, REJECTED
+  reason String? @db.Text
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([status])
+  @@index([createdAt])
+}
+
+model Follow {
+  id String @id @default(cuid())
+  followerId String @db.VarChar(16)
+  followingId String @db.VarChar(16)
+  createdAt DateTime @default(now())
+
+  follower User @relation("Following", fields: [followerId], references: [id], onDelete: Cascade)
+  following User @relation("Followers", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+  @@index([createdAt])
 }
