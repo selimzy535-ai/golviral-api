@@ -17,7 +17,6 @@ const fs = require('fs');
 const path = require('path');
 
 // ========== INIT & SECURITY OVERRIDES ==========
-// ========== INIT & SECURITY OVERRIDES ==========
 const app = express();
 
 // Body parser - 50MB for video uploads
@@ -31,7 +30,6 @@ const allowedOrigins = [
 
 app.use(cors({ 
   origin: (origin, callback) => {
-    // Allow requests with no origin like Postman/cURL
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -49,16 +47,12 @@ app.use(morgan('combined'));
 // ========== ENV CONFIG ==========
 const PORT = process.env.PORT || 10000;
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
-
-// APP_BASE_URL - Use GitHub Pages until domain bought
 const APP_BASE_URL = process.env.APPBASEURL || 'https://selimzy535-ai.github.io/golviral-frontend';
 
 console.log(`[INIT] GolViral v4.5 Hardened Core Stack Engine...`);
 console.log(`[CONFIG] APP_BASE_URL: ${APP_BASE_URL}`);
 
-console.log(`[INIT] Initializing GolViral v4.5 Hardened Core Stack Engine...`);
-
-// ========== 3x SHARDING PRISMA CLIENTS WITH FAILSAFE CAPABILITY ==========
+// ========== 3x SHARDING PRISMA CLIENTS ==========
 const dbUrls = [
   process.env.DATABASEURL1,
   process.env.DATABASEURL2,
@@ -71,14 +65,13 @@ const prismaClients = {
   db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db3" } } }),
 };
 
-// Validate environment connectivity on instantiation
 Object.entries(prismaClients).forEach(([name, client]) => {
   client.$connect()
     .then(() => console.log(`[Prisma Success] Connected cleanly to ${name}`))
-    .catch((err) => console.error(`[Prisma Warning] Shard ${name} offline on start, running dynamic interception pipeline.`, err.message));
+    .catch((err) => console.error(`[Prisma Warning] Shard ${name} offline on start.`, err.message));
 });
 
-// ========== 3x REDIS CLIENTS WITH COMPREHENSIVE RECOVERY LOCKS ==========
+// ========== 3x REDIS CLIENTS ==========
 const redisUrls = [
   process.env.REDISURL1,
   process.env.REDISURL2,
@@ -92,15 +85,11 @@ const redisClients = {
 };
 
 Object.entries(redisClients).forEach(([name, client]) => {
-  client.on('error', (err) => {
-    console.error(`[Redis Error Intercepted] Shard ${name} connectivity breakdown: ${err.message}`);
-  });
-  client.on('connect', () => {
-    console.log(`[Redis Connected] Shard ${name} successfully established connection.`);
-  });
+  client.on('error', (err) => console.error(`[Redis Error] Shard ${name}: ${err.message}`));
+  client.on('connect', () => console.log(`[Redis Connected] Shard ${name} established.`));
 });
 
-// ========== 3x BACKBLAZE B2 STORAGE MATRIX ROUTER ==========
+// ========== 3x BACKBLAZE B2 MATRIX ==========
 const b2Config = {
   a: { endpoint: process.env.B2ENDPOINTA || 'https://s3.us-west-000.backblazeb2.com', key: process.env.B2KEYID_A || 'mock', secret: process.env.B2APPKEY_A || 'mock', bucket: process.env.B2BUCKETA || 'mock-a' },
   b: { endpoint: process.env.B2ENDPOINTB || process.env.B2ENDPOINTA || 'https://s3.us-west-000.backblazeb2.com', key: process.env.B2KEYID_B || process.env.B2KEYID_A || 'mock', secret: process.env.B2APPKEY_B || process.env.B2APPKEY_A || 'mock', bucket: process.env.B2BUCKETB || 'mock-b' },
@@ -113,7 +102,7 @@ const b2Clients = {
   b2c: new S3Client({ endpoint: b2Config.c.endpoint, credentials: { accessKeyId: b2Config.c.key, secretAccessKey: b2Config.c.secret }, region: 'us-west-000' }),
 };
 
-// ========== SHARDING HIGH-AVAILABILITY ROUTING HELPERS ==========
+// ========== SHARDING ROUTING HELPERS ==========
 function getShardIndex(id) {
   if (!id) return 0;
   return parseInt(id, 36) % 3;
@@ -151,16 +140,33 @@ async function findUserAcrossShards(field, value) {
       const user = await db.client.user.findUnique({ where: { [field]: value } });
       if (user) return { user, db: db.client, name: db.name };
     } catch (err) {
-      console.error(`[Sharded Query Trap] Failed search on ${db.name}: ${err.message}`);
+      console.error(`[Shard User Search Fail] ${db.name}: ${err.message}`);
     }
   }
   return null;
 }
 
-// ========== FAULT-TOLERANT MEMORY MEMBUFFER SYSTEM ==========
+async function findPostAcrossShards(id) {
+  const dbs = [
+    { client: prismaClients.db1, name: 'db1' },
+    { client: prismaClients.db2, name: 'db2' },
+    { client: prismaClients.db3, name: 'db3' }
+  ];
+  for (const db of dbs) {
+    try {
+      const post = await db.client.post.findUnique({ where: { id } });
+      if (post) return { post, db: db.client, name: db.name };
+    } catch (err) {
+      console.error(`[Shard Post Search Fail] ${db.name}: ${err.message}`);
+    }
+  }
+  return null;
+}
+
+// ========== GLOBAL MEMORY BUFFER ==========
 let interactionBuffer = [];
 
-// ========== CRITICAL RECOVERY EMAIL SYSTEM ENGINE ==========
+// ========== EMAIL ENGINE ==========
 async function sendEmail(to, subject, html) {
   if (!to) return console.error('[Email Engine Error] Recipient field undefined.');
   const mailOptions = { from: process.env.BREVO_USER || 'noreply@golviral.com', to, subject, html };
@@ -175,23 +181,23 @@ async function sendEmail(to, subject, html) {
       auth: { user: process.env.BREVO_USER, pass: process.env.BREVO_PASS }
     });
     await brevo.sendMail(mailOptions);
-    console.log(`[Email Dispatched] Primary pipeline sent email cleanly to ${to}`);
+    console.log(`[Email Dispatched] Primary sent cleanly to ${to}`);
   } catch (err) {
-    console.error(`[Email Warning] Primary pipeline failed, executing Resend Fallback Matrix... Strategy: ${err.message}`);
+    console.error(`[Email Warning] Primary failed, executing Resend Matrix...`);
     if (!process.env.RESENDAPIKEY) {
-      return console.error('[Email Catastrophe] Resend credentials not defined. System notifications compromised.');
+      return console.error('[Email Catastrophe] Resend credentials not defined.');
     }
     await axios.post('https://api.resend.com/emails', {
       from: process.env.BREVO_USER || 'noreply@golviral.com', to: [to], subject, html
     }, { 
       headers: { 'Authorization': `Bearer ${process.env.RESENDAPIKEY}`, 'Content-Type': 'application/json' } 
     })
-    .then(() => console.log(`[Email Dispatched] Dynamic fallback system recovered execution for ${to}`))
-    .catch((fallbackErr) => console.error(`[Email Failure] Fallback pipeline totally collapsed:`, fallbackErr.message));
+    .then(() => console.log(`[Email Dispatched] Fallback recovered for ${to}`))
+    .catch((fallbackErr) => console.error(`[Email Failure] Total collapse:`, fallbackErr.message));
   }
 }
 
-// ========== MEMORY RESILIENT MATH BOT STACK ENGINE ==========
+// ========== MATH BOT CHALLENGE ENGINE ==========
 app.post('/api/bot-challenge', async (req, res) => {
   try {
     const ops = ['+', '-', '*']; 
@@ -209,13 +215,11 @@ app.post('/api/bot-challenge', async (req, res) => {
     try {
       await fallbackShard.set(`bot:${challengeToken}`, ans.toString(), 'EX', 120);
     } catch (redisErr) {
-      console.error(`[Redis Matrix Degraded] Saving math logic to process layer due to: ${redisErr.message}`);
       global[`mem_bot_${challengeToken}`] = { ans: ans.toString(), exp: Date.now() + 120000 };
     }
 
     res.json({ question: `${a} ${op} ${b} = ?`, token: challengeToken });
   } catch (err) {
-    console.error(`[Math Engine Failure] Crash bypassed. Sending default emergency validation frame.`, err.message);
     res.json({ question: "5 + 5 = ?", token: "emergency_token_bypass" });
   }
 });
@@ -236,9 +240,7 @@ app.post('/api/bot-verify', async (req, res) => {
         if (saved) await fallbackShard.del(`bot:${token}`);
       } catch (redisErr) {
         const memObj = global[`mem_bot_${token}`];
-        if (memObj && memObj.exp > Date.now()) {
-          saved = memObj.ans;
-        }
+        if (memObj && memObj.exp > Date.now()) saved = memObj.ans;
         delete global[`mem_bot_${token}`];
       }
     }
@@ -256,7 +258,6 @@ app.post('/api/bot-verify', async (req, res) => {
 
     res.json({ passToken });
   } catch (err) {
-    console.error('[Bot Verify Critical Error]', err.message);
     res.status(500).json({ error: 'Validation processing exception' });
   }
 });
@@ -280,7 +281,7 @@ async function internalVerifyPassToken(passToken) {
   return false;
 }
 
-// ========== RESILIENT ROUTING AUTH TOKENS MIDDLEWARE ==========
+// ========== AUTH MIDDLEWARE ==========
 function authenticateToken(req, res, next) {
   try {
     const authHeader = req.headers['authorization'];
@@ -293,12 +294,11 @@ function authenticateToken(req, res, next) {
       next();
     });
   } catch (err) {
-    console.error('[Middleware Interception Exception]', err.message);
     res.status(500).json({ error: 'Security pipeline tracking collapse' });
   }
 }
 
-// ========== TRANSACTION CONCURRENCY ENGINE WITH SHARD ROSTERS ==========
+// ========== TRANSACTION CONCURRENCY ENGINE ==========
 async function processWalletTransaction({ userId, action, isCreator, meta = {} }) {
   if (!userId) return;
   const redis = getRedisShard(userId);
@@ -307,14 +307,11 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
   let lockAcquired = false;
   try {
     const lock = await redis.set(`lock:${userId}`, '1', 'EX', 3, 'NX').catch(() => 'DYNAMIC_PASS');
-    if (!lock) {
-      console.warn(`[Lock Collapsed] Throttling user concurrency trace context for ${userId}`);
-      return; 
-    }
+    if (!lock) return;
     lockAcquired = true;
 
     const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
-    if (!user) return console.error(`[Transaction Error] Shard user entity isolation failed for reference ${userId}`);
+    if (!user) return;
 
     const walletType = user.monetizeFlag ? 'CASH' : 'FREE';
     let pointsToAdd = 0;
@@ -360,7 +357,7 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
       })
     ]);
   } catch (err) {
-    console.error(`[Wallet Tx Intercepted State Reversion Initiated] Error tracing user allocation loop: ${err.message}`);
+    console.error(`[Transaction Intercept] Error allocation loop: ${err.message}`);
   } finally {
     if (lockAcquired) {
       await redis.del(`lock:${userId}`).catch(() => {});
@@ -368,14 +365,14 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
   }
 }
 
-// ========== CORE SIGNUP & SECURITY GATEWAYS ==========
+// ========== SIGNUP & LOGIN GATEWAYS ==========
 app.post('/api/auth/signup', async (req, res) => {
   try {
     const { username, email, password, referralCode, passToken } = req.body;
     if (!username || !email || !password) return res.status(400).json({ error: 'Missing fields' });
     
     if (!(await internalVerifyPassToken(passToken))) {
-      return res.status(400).json({ error: 'Math verification failed or expired session tracking signature' });
+      return res.status(400).json({ error: 'Math verification failed or expired session' });
     }
 
     const existing = await findUserAcrossShards('email', email);
@@ -410,8 +407,7 @@ app.post('/api/auth/signup', async (req, res) => {
     const token = jwt.sign({ userId, username }, JWT_SECRET, { expiresIn: '30d' });
     res.status(201).json({ token, userId, profileLink: `${APP_BASE_URL}/u/${userId}` });
   } catch (err) {
-    console.error('[Registration Engine Exception]', err.message);
-    res.status(500).json({ error: 'Registration framework failure safely caught' });
+    res.status(500).json({ error: 'Registration framework failure caught' });
   }
 });
 
@@ -431,8 +427,7 @@ app.post('/api/auth/login', async (req, res) => {
     const token = jwt.sign({ userId: context.user.id, username: context.user.username }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ token, userId: context.user.id, profileLink: `${APP_BASE_URL}/u/${context.user.id}` });
   } catch (err) {
-    console.error('[Authentication Gateway System Failure]', err.message);
-    res.status(500).json({ error: 'Login engine exception pipeline executed cleanly' });
+    res.status(500).json({ error: 'Login engine exception pipeline executed' });
   }
 });
 
@@ -452,10 +447,9 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       global[`otp_${email}`] = { otp, exp: Date.now() + 900000 };
     });
 
-    await sendEmail(email, 'Password Security Reset Access Payload', `<p>Your validation parameter tracking token: <b>${otp}</b>. Valid 15 minutes.</p>`);
+    await sendEmail(email, 'Password Security Reset Access Payload', `<p>Your validation token: <b>${otp}</b>. Valid 15 minutes.</p>`);
     res.json({ message: 'If account maps inside database, recovery parameters have been targeted' });
   } catch (err) {
-    console.error('[Forgot Password Subsystem Crash Bypass]', err.message);
     res.json({ message: 'Dynamic fallback completed context execution gracefully' });
   }
 });
@@ -473,7 +467,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
       savedOtp = global[`otp_${email}`].otp;
     }
 
-    if (!savedOtp || savedOtp !== String(otp).trim()) return res.status(400).json({ error: 'Expired or mismatched security parameter tracking data' });
+    if (!savedOtp || savedOtp !== String(otp).trim()) return res.status(400).json({ error: 'Expired or mismatched security token' });
 
     const hash = await bcrypt.hash(newPassword, 12);
     await context.db.user.update({ where: { email }, data: { password: hash } });
@@ -483,12 +477,132 @@ app.post('/api/auth/reset-password', async (req, res) => {
 
     res.json({ message: 'Password cluster reconfiguration finalized' });
   } catch (err) {
-    console.error('[Reset Subsystem Crash Bypass]', err.message);
     res.status(500).json({ error: 'Reconfigured update failure safely intercepted' });
   }
 });
 
-// ========== BULK MEMORY INGESTION FEED ROUTING PORTS ==========
+// ========== POST CREATION & PROCESSING PORTS ==========
+app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
+  const { userId } = req.user;
+  const { fileExtension, contentType, postType } = req.body;
+
+  const db = getDbShard(userId);
+  const redis = getRedisShard(userId);
+
+  const lock = await redis.set(`lock:${userId}`, '1', 'EX', 2, 'NX').catch(() => 'PASS_BYPASS_LOCK');
+  if (!lock) return res.status(423).json({ error: 'Concurrency execution layer busy' });
+
+  try {
+    const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
+    if (!user) return res.status(404).json({ error: 'User mapping vanished inside infrastructure arrays' });
+
+    const fee = (postType === 'novel' || postType === 'story') ? 10 : 25;
+    if (user.freeCredits < fee) return res.status(400).json({ error: `Insufficient points: Need ${fee} credits` });
+
+    const today = new Date().toISOString().split('T')[0];
+    const postsKey = `posts:${userId}:${today}`;
+    const postsToday = parseInt(await redis.get(postsKey).catch(() => '0') || '0');
+    if (postsToday >= 3) return res.status(429).json({ error: 'Daily posting thresholds violated. Cap = 3/day.' });
+
+    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } } });
+
+    const postId = crypto.randomBytes(8).toString('hex');
+    const b2 = getB2Shard(userId);
+    const key = `media/${postId}.${fileExtension || 'mp4'}`;
+
+    let presignedUrl = "";
+    try {
+      const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: contentType || 'video/mp4' });
+      presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
+    } catch (s3Err) {
+      presignedUrl = `https://${b2.bucket}.s3.us-west-000.backblazeb2.com/${key}`;
+    }
+
+    await db.client.post.create({
+      data: { id: postId, userId, type: postType || 'reel', mediaUrl: key, thumbnailUrl: '', status: 'PRE_UPLOAD', b2Shard: getShardIndex(userId) }
+    });
+
+    res.json({ postId, uploadUrl: presignedUrl, objectKey: key });
+  } catch (err) {
+    res.status(500).json({ error: 'Intent initialization exception caught' });
+  }
+});
+
+app.post('/api/post/create', authenticateToken, async (req, res) => {
+  const { userId } = req.user;
+  const { postId, objectKey, title, content } = req.body;
+
+  const db = getDbShard(userId);
+  const b2 = getB2Shard(userId);
+
+  const post = await db.client.post.findUnique({ where: { id: postId } }).catch(() => null);
+  if (!post) return res.status(404).json({ error: 'Target tracking missing' });
+
+  if (post.type === 'novel' || post.type === 'story') {
+    await db.client.post.update({
+      where: { id: postId },
+      data: { status: 'ACTIVE', title: title || '', content: content || '' }
+    });
+    return res.json({ message: 'Content compilation complete', postId });
+  }
+
+  const localVideoPath = path.join(__dirname, `temp_${postId}.mp4`);
+  const localThumbPath = path.join(__dirname, `thumb_${postId}.jpg`);
+
+  try {
+    const getCmd = new GetObjectCommand({ Bucket: b2.bucket, Key: objectKey });
+    const s3Object = await b2.client.send(getCmd);
+
+    const writeStream = fs.createWriteStream(localVideoPath);
+    s3Object.Body.pipe(writeStream);
+
+    await new Promise((resolve, reject) => {
+      writeStream.on('finish', resolve);
+      writeStream.on('error', reject);
+    });
+
+    if (!fs.existsSync(localVideoPath) || fs.statSync(localVideoPath).size > 1.5 * 1024 * 1024) {
+      throw new Error('Size threshold check parameters completely violated');
+    }
+
+    await new Promise((resolve) => {
+      exec(`ffmpeg -ss 00:00:01 -i "${localVideoPath}" -vframes 1 -q:v 2 "${localThumbPath}"`, () => {
+        if (!fs.existsSync(localThumbPath)) fs.writeFileSync(localThumbPath, 'placeholder_data');
+        resolve();
+      });
+    });
+
+    const thumbKey = `thumbs/${postId}.jpg`;
+    if (fs.existsSync(localThumbPath)) {
+      const thumbBuffer = fs.readFileSync(localThumbPath);
+      await b2.client.send(new PutObjectCommand({
+        Bucket: b2.bucket, Key: thumbKey, Body: thumbBuffer, ContentType: 'image/jpeg'
+      })).catch(() => {});
+    }
+
+    const finalCmdVideo = new GetObjectCommand({ Bucket: b2.bucket, Key: objectKey });
+    const finalCmdThumb = new GetObjectCommand({ Bucket: b2.bucket, Key: thumbKey });
+
+    const mediaPlaybackUrl = await getSignedUrl(b2.client, finalCmdVideo, { expiresIn: 604800 }).catch(() => `https://${b2.bucket}.b2.com/${objectKey}`);
+    const thumbPlaybackUrl = await getSignedUrl(b2.client, finalCmdThumb, { expiresIn: 604800 }).catch(() => `https://${b2.bucket}.b2.com/${thumbKey}`);
+
+    await db.client.post.update({
+      where: { id: postId },
+      data: { status: 'ACTIVE', mediaUrl: mediaPlaybackUrl, thumbnailUrl: thumbPlaybackUrl }
+    });
+
+    res.json({ message: 'Content compilation complete', postId, mediaUrl: mediaPlaybackUrl, thumbnailUrl: thumbPlaybackUrl });
+  } catch (err) {
+    await db.client.post.update({ where: { id: postId }, data: { status: 'REJECTED' } }).catch(() => {});
+    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: 25 } } }).catch(() => {});
+    res.status(400).json({ error: 'Video compliance failed. Points recovered.' });
+  } finally {
+    if (fs.existsSync(localVideoPath)) fs.unlinkSync(localVideoPath);
+    if (fs.existsSync(localThumbPath)) fs.unlinkSync(localThumbPath);
+  }
+});
+
+// ========== LIVE TRACKING & FEED PORTS ==========
 app.post('/api/view', (req, res) => {
   const { postId, userId, viewerId, viewerIp } = req.body;
   if (postId && userId) {
@@ -509,18 +623,18 @@ app.post('/api/comment', authenticateToken, async (req, res) => {
   try {
     const { postId, creatorId } = req.body;
     const actorId = req.user.userId;
-    if (!postId || !creatorId) return res.status(400).json({ error: 'Invalid post context data mapping' });
+    if (!postId || !creatorId) return res.status(400).json({ error: 'Invalid post context mapping' });
 
     const redis = getRedisShard(actorId);
     const cooldown = await redis.get(`cool:comment:${actorId}`).catch(() => null);
-    if (cooldown) return res.status(429).json({ error: 'Comment velocity cooling loop system active' });
-    
+    if (cooldown) return res.status(429).json({ error: 'Comment cooldown active' });
+
     await redis.set(`cool:comment:${actorId}`, '1', 'EX', 120).catch(() => {});
 
     interactionBuffer.push({ type: 'COMMENT', postId, userId: creatorId, actorId, timestamp: Date.now() });
     res.status(202).json({ buffered: true });
   } catch (err) {
-    res.status(202).json({ buffered: true, warning: 'Forced cache routing bypass execution' });
+    res.status(202).json({ buffered: true });
   }
 });
 
@@ -532,131 +646,6 @@ app.post('/api/read-session', authenticateToken, (req, res) => {
   res.status(202).json({ buffered: true });
 });
 
-// ========== EXTREMELY STRONG MULTI-SHARDED UPLOAD INTENT LOGIC ==========
-app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
-  const { userId } = req.user;
-  const { fileExtension, contentType } = req.body;
-  
-  const db = getDbShard(userId);
-  const redis = getRedisShard(userId);
-
-  const lock = await redis.set(`lock:${userId}`, '1', 'EX', 2, 'NX').catch(() => 'PASS_BYPASS_LOCK');
-  if (!lock) return res.status(423).json({ error: 'Concurrency execution layer busy' });
-
-  try {
-    const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
-    if (!user) return res.status(404).json({ error: 'User mapping vanished inside infrastructure arrays' });
-    
-    if (user.freeCredits < 25) return res.status(400).json({ error: 'Insufficient authorization points: Need 25 credits' });
-
-    const today = new Date().toISOString().split('T')[0];
-    const postsKey = `posts:${userId}:${today}`;
-    const postsToday = parseInt(await redis.get(postsKey).catch(() => '0') || '0');
-    if (postsToday >= 3) return res.status(429).json({ error: 'Daily posting thresholds violated. Cap = 3/day.' });
-
-    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: 25 } } });
-
-    const postId = crypto.randomBytes(8).toString('hex');
-    const b2 = getB2Shard(userId);
-    const key = `media/${postId}.${fileExtension || 'mp4'}`;
-
-    let presignedUrl = "";
-    try {
-      const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: contentType || 'video/mp4' });
-      presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
-    } catch (s3Err) {
-      console.error('[B2 Presign Matrix Error] Swapping execution payload to emergency object pointer fallback', s3Err.message);
-      presignedUrl = `https://${b2.bucket}.s3.us-west-000.backblazeb2.com/${key}?emergency_bypass=true`;
-    }
-
-    await db.client.post.create({
-      data: { id: postId, userId, mediaUrl: key, thumbnailUrl: '', status: 'PRE_UPLOAD', b2Shard: getShardIndex(userId) }
-    });
-
-    await redis.incr(postsKey).catch(() => {});
-    await redis.expire(postsKey, 86400).catch(() => {});
-
-    res.json({ postId, presignedUrl, bucket: b2.bucket, objectKey: key });
-  } catch (err) {
-    console.error('[Upload Intent Failure Safeguard Executed]', err.message);
-    res.status(500).json({ error: 'Pipeline processing context fail-safe intercept complete' });
-  } finally {
-    await redis.del(`lock:${userId}`).catch(() => {});
-  }
-});
-
-app.post('/api/post/create', authenticateToken, async (req, res) => {
-  const { userId } = req.user;
-  const { postId, objectKey } = req.body;
-  
-  const db = getDbShard(userId);
-  const b2 = getB2Shard(userId);
-
-  const post = await db.client.post.findUnique({ where: { id: postId } }).catch(() => null);
-  if (!post) return res.status(404).json({ error: 'Target tracking missing' });
-
-  const localVideoPath = path.join(__dirname, `temp_${postId}.mp4`);
-  const localThumbPath = path.join(__dirname, `thumb_${postId}.jpg`);
-
-  try {
-    const getCmd = new GetObjectCommand({ Bucket: b2.bucket, Key: objectKey });
-    const s3Object = await b2.client.send(getCmd);
-    
-    const writeStream = fs.createWriteStream(localVideoPath);
-    s3Object.Body.pipe(writeStream);
-
-    await new Promise((resolve, reject) => {
-      writeStream.on('finish', resolve);
-      writeStream.on('error', reject);
-    });
-
-    if (!fs.existsSync(localVideoPath) || fs.statSync(localVideoPath).size > 1.5 * 1024 * 1024) {
-      throw new Error('Size threshold check parameters completely violated');
-    }
-
-    await new Promise((resolve, reject) => {
-      exec(`ffmpeg -ss 00:00:01 -i ${localVideoPath} -vframes 1 -q:v 2 ${localThumbPath}`, (err) => {
-        if (err) {
-          console.warn('[FFmpeg Intercepted warning] Local binary absent or processing failed, generating blank thumb placeholder matrix.');
-          fs.writeFileSync(localThumbPath, 'placeholder_data');
-        }
-        resolve();
-      });
-    });
-
-    const thumbKey = `thumbs/${postId}.jpg`;
-    if (fs.existsSync(localThumbPath)) {
-      const thumbBuffer = fs.readFileSync(localThumbPath);
-      await b2.client.send(new PutObjectCommand({
-        Bucket: b2.bucket, Key: thumbKey, Body: thumbBuffer, ContentType: 'image/jpeg'
-      })).catch(() => console.error('[Storage Error] Thumbnail transmission framework block bypassed'));
-    }
-
-    const finalCmdVideo = new GetObjectCommand({ Bucket: b2.bucket, Key: objectKey });
-    const finalCmdThumb = new GetObjectCommand({ Bucket: b2.bucket, Key: thumbKey });
-    
-    const mediaPlaybackUrl = await getSignedUrl(b2.client, finalCmdVideo, { expiresIn: 604800 }).catch(() => `https://${b2.bucket}.b2.com/${objectKey}`);
-    const thumbPlaybackUrl = await getSignedUrl(b2.client, finalCmdThumb, { expiresIn: 604800 }).catch(() => `https://${b2.bucket}.b2.com/${thumbKey}`);
-
-    await db.client.post.update({
-      where: { id: postId },
-      data: { status: 'ACTIVE', mediaUrl: mediaPlaybackUrl, thumbnailUrl: thumbPlaybackUrl }
-    });
-
-    res.json({ message: 'Content compilation complete', postId, mediaUrl: mediaPlaybackUrl, thumbnailUrl: thumbPlaybackUrl });
-  } catch (err) {
-    console.error(`[Failsafe Triggered - Refunding Points Engine] Processing abort loop back-traced: ${err.message}`);
-    
-    await db.client.post.update({ where: { id: postId }, data: { status: 'REJECTED' } }).catch(() => {});
-    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: 25 } } }).catch(() => {});
-    
-    res.status(400).json({ error: 'Video system compliance checking failed. Authorization fee points fully recovered.' });
-  } finally {
-    if (fs.existsSync(localVideoPath)) fs.unlinkSync(localVideoPath);
-    if (fs.existsSync(localThumbPath)) fs.unlinkSync(localThumbPath);
-  }
-});
-
 app.get('/api/feed', async (req, res) => {
   const feed = [];
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
@@ -665,7 +654,7 @@ app.get('/api/feed', async (req, res) => {
     try {
       const posts = await db.post.findMany({
         where: { status: 'ACTIVE' },
-        orderBy: { score: 'desc' }, // rank by viral score
+        orderBy: { score: 'desc' },
         take: 12
       });
       feed.push(...posts);
@@ -677,28 +666,28 @@ app.get('/api/feed', async (req, res) => {
   res.json(feed.slice(0, 20));
 });
 
-// ========== BULK DEPOSIT ASSURANCE DECOUPLED PORTS ==========
+// ========== PAYMENT & WALLET SYSTEMS ==========
 app.post('/api/deposit/verify', async (req, res) => {
   try {
     const { userId, reference, tierAmount, passToken } = req.body;
     if (!(await internalVerifyPassToken(passToken))) {
-      return res.status(400).json({ error: 'Math verification sequence mapping missing' });
+      return res.status(400).json({ error: 'Math verification sequence missing' });
     }
 
     const db = getDbShard(userId);
     const selarCheck = await axios.get(`https://api.selar.co/merchant/v1/payments/verify/${reference}`, {
-      headers: { 'Authorization': `Bearer ${process.env.RESENDAPIKEY || 'fallback'}` }
+      headers: { 'Authorization': `Bearer ${process.env.SELAR_SECRET_KEY || 'fallback'}` }
     }).catch(() => null);
 
     if (!selarCheck || selarCheck.data.status !== 'success') {
-      console.warn(`[Selar Verification Skipped/Failed] Running protection parameters for payload reference: ${reference}`);
+      console.warn(`[Selar Verification Skipped/Failed] Testing parameters used for fallback reference: ${reference}`);
     }
 
     let creditYield = 0;
     const tiers = { 500: 5000, 1500: 15000, 3000: 30000, 5000: 50000, 7000: 70000, 10000: 100000, 15000: 150000 };
     creditYield = tiers[tierAmount] || 0;
 
-    if (creditYield === 0) return res.status(400).json({ error: 'Unrecognized payment allocation request cluster structure' });
+    if (creditYield === 0) return res.status(400).json({ error: 'Unrecognized payment tier structure' });
 
     await db.client.user.update({
       where: { id: userId }, data: { freeCredits: { increment: creditYield } }
@@ -706,12 +695,10 @@ app.post('/api/deposit/verify', async (req, res) => {
 
     res.json({ success: true, balance: creditYield });
   } catch (err) {
-    console.error('[Deposit Hard Core Pipeline Error Safely Handled]', err.message);
-    res.status(500).json({ error: 'Deposit core matrix matching exception caught' });
+    res.status(500).json({ error: 'Deposit core exception caught' });
   }
 });
 
-// ========== INTEGRATION HIGH AVAILABILITY WALLET FRAMEWORKS ==========
 app.get('/api/wallet', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
@@ -720,7 +707,7 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
     const today = new Date().toISOString().split('T')[0];
 
     const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
-    if (!user) return res.status(404).json({ error: 'Financial data profile footprint missing context mapping' });
+    if (!user) return res.status(404).json({ error: 'User mapping data footprint missing' });
 
     const todayEarned = parseFloat(await redis.get(`cap:${userId}:${today}`).catch(() => '0') || '0');
     const refs = await db.client.referral.count({ where: { referrerId: userId, status: 'QUALIFIED' } }).catch(() => 0);
@@ -736,7 +723,6 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
       monetized: user.monetizeFlag
     });
   } catch (err) {
-    console.error('[Wallet Framework Intercept Exception Engine Triggered]', err.message);
     res.status(200).json({ freeCredits: 0, cashBalance: 0, todayEarnings: 0, degradedModeActive: true });
   }
 });
@@ -757,7 +743,6 @@ app.get('/api/user/:id', async (req, res) => {
       select: { id: true, views: true, likes: true }
     });
 
-    // Search all 3 shards for follow counts since follows can be on any shard
     let followers = 0, following = 0;
     const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
 
@@ -783,17 +768,16 @@ app.get('/api/user/:id', async (req, res) => {
       referralLink: `${APP_BASE_URL}/auth.html?ref=${id}`
     });
   } catch (err) {
-    console.error('[Profile Stats Error]', err.message);
     res.status(500).json({ error: 'Failed to load profile' });
   }
 });
 
 app.post('/api/follow', authenticateToken, async (req, res) => {
-  const followerId = req.userId;
+  const followerId = req.user.userId;
   const { followingId } = req.body;
   if (followerId === followingId) return res.status(400).json({ error: 'Cannot follow yourself' });
 
-  const db = getDbShard(followingId); // store follow on target user's shard
+  const db = getDbShard(followingId);
 
   try {
     await db.client.follow.create({ data: { followerId, followingId } });
@@ -804,7 +788,7 @@ app.post('/api/follow', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/unfollow', authenticateToken, async (req, res) => {
-  const followerId = req.userId;
+  const followerId = req.user.userId;
   const { followingId } = req.body;
   const db = getDbShard(followingId);
 
@@ -819,11 +803,11 @@ app.post('/api/wallet/withdraw', authenticateToken, async (req, res) => {
     const db = getDbShard(userId);
     const redis = getRedisShard(userId);
 
-    if (amountPoints < 50000) return res.status(400).json({ error: 'Minimum allocation transfer context barrier is 50,000 pts' });
+    if (amountPoints < 50000) return res.status(400).json({ error: 'Minimum transfer barrier is 50,000 pts' });
 
     const user = await db.client.user.findUnique({ where: { id: userId } });
     if (!user.monetizeFlag || user.cashBalance < amountPoints) {
-      return res.status(400).json({ error: 'Financial criteria unlock authorization parameters denied' });
+      return res.status(400).json({ error: 'Financial criteria parameter denied' });
     }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -831,11 +815,10 @@ app.post('/api/wallet/withdraw', authenticateToken, async (req, res) => {
       global[`withdraw_otp_${userId}`] = { payload: { amountPoints, routingTarget, targetDetails, otp }, exp: Date.now() + 600000 };
     });
 
-    await sendEmail(user.email, 'Authorization OTP Sequence Generated', `<p>Withdrawal verification challenge dynamic sequence code: <b>${otp}</b></p>`);
+    await sendEmail(user.email, 'Authorization OTP Sequence Generated', `<p>Withdrawal verification challenge code: <b>${otp}</b></p>`);
     res.json({ authChallenge: true });
   } catch (err) {
-    console.error('[Withdrawal Subsystem Intercept Trapped]', err.message);
-    res.status(500).json({ error: 'Financial gateway allocation breakdown bypass active' });
+    res.status(500).json({ error: 'Financial gateway breakdown bypass active' });
   }
 });
 
@@ -850,10 +833,10 @@ app.post('/api/wallet/withdraw/confirm', authenticateToken, async (req, res) => 
     payload = JSON.stringify(global[`withdraw_otp_${userId}`].payload);
   }
 
-  if (!payload) return res.status(400).json({ error: 'Session transaction context matching validation expired' });
+  if (!payload) return res.status(400).json({ error: 'Session transaction validation expired' });
   const parsed = JSON.parse(payload);
 
-  if (parsed.otp !== String(otp).trim()) return res.status(400).json({ error: 'Verification payload parameters invalid' });
+  if (parsed.otp !== String(otp).trim()) return res.status(400).json({ error: 'Verification payload invalid' });
 
   try {
     await db.client.$transaction([
@@ -866,19 +849,57 @@ app.post('/api/wallet/withdraw/confirm', authenticateToken, async (req, res) => 
     delete global[`withdraw_otp_${userId}`];
     res.json({ transactionAcknowledged: true });
   } catch (err) {
-    console.error('[Critical Ledger Balance System Failure Bypassed Safely]', err.message);
-    res.status(500).json({ error: 'Ledger synchronization tracking lock protection active' });
+    res.status(500).json({ error: 'Ledger synchronization tracking lock active' });
   }
 });
 
 // ========== SECURITY MATURING ADMIN QUEUE ROUTERS ==========
+function requireAdmin(req, res, next) {
+  authenticateToken(req, res, async () => {
+    const adminId = req.user?.userId;
+    if (!adminId) return res.status(401).json({ error: 'Token mapping error' });
+    const db = getDbShard(adminId);
+    const user = await db.client.user.findUnique({ where: { id: adminId } });
+    if (user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    next();
+  });
+}
+
+app.get('/api/admin/posts/pending', requireAdmin, async (req, res) => {
+  const all = [];
+  for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
+    const posts = await db.post.findMany({ where: { status: 'PRE_UPLOAD' }, include: { user: true } }).catch(() => []);
+    all.push(...posts);
+  }
+  res.json(all);
+});
+
+app.post('/api/admin/posts/:id/approve', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const target = await findPostAcrossShards(id);
+  if (!target) return res.status(404).json({ error: 'Post not found across infrastructure shards' });
+  await target.db.post.update({ where: { id }, data: { status: 'ACTIVE' } });
+  res.json({ success: true });
+});
+
+app.post('/api/admin/posts/:id/reject', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const target = await findPostAcrossShards(id);
+  if (!target) return res.status(404).json({ error: 'Post not found across infrastructure shards' });
+  await target.db.$transaction([
+    target.db.post.update({ where: { id }, data: { status: 'REJECTED' } }),
+    target.db.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: 25 } } })
+  ]);
+  res.json({ success: true });
+});
+
 app.post('/api/admin/verify-gate', async (req, res) => {
   const { passToken } = req.body;
-  if (!(await internalVerifyPassToken(passToken))) return res.status(400).json({ error: 'Barrier verification matching failed' });
+  if (!(await internalVerifyPassToken(passToken))) return res.status(400).json({ error: 'Barrier verification failed' });
   res.json({ pass: true });
 });
 
-app.get('/api/admin/payouts', async (req, res) => {
+app.get('/api/admin/payouts', requireAdmin, async (req, res) => {
   const all = [];
   for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
     await db.payoutQueue.findMany({ where: { status: 'PENDING' } })
@@ -888,17 +909,17 @@ app.get('/api/admin/payouts', async (req, res) => {
   res.json(all);
 });
 
-app.post('/api/admin/payouts/approve', async (req, res) => {
+app.post('/api/admin/payouts/approve', requireAdmin, async (req, res) => {
   try {
     const { payoutId, userId } = req.body;
     await getDbShard(userId).client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'APPROVED' } });
     res.json({ success: true });
   } catch {
-    res.status(500).json({ error: 'System administration ledger connection skipped update tracking' });
+    res.status(500).json({ error: 'Ledger tracking execution failed' });
   }
 });
 
-app.post('/api/admin/payouts/reject', async (req, res) => {
+app.post('/api/admin/payouts/reject', requireAdmin, async (req, res) => {
   try {
     const { payoutId, userId, reason } = req.body;
     const db = getDbShard(userId);
@@ -914,11 +935,10 @@ app.post('/api/admin/payouts/reject', async (req, res) => {
   }
 });
 
-// ========== MULTI-LAYER CRON FLUSHING LOOPS WITH ANTI-DATA LOSS PROTECTION ==========
+// ========== CRON BUFFER INGESTION ENGINE ==========
 cron.schedule('*/10 * * * * *', async () => {
   if (interactionBuffer.length === 0) return;
 
-  // Shallow copy and clear the buffer atomically for this tick
   const batch = [...interactionBuffer];
   interactionBuffer = [];
 
@@ -941,7 +961,6 @@ cron.schedule('*/10 * * * * *', async () => {
             meta: { refId: item.postId } 
           });
           
-          // Fixed missing parentheses
           await db.client.post.update({ 
             where: { id: item.postId }, 
             data: { views: { increment: 1 } } 
@@ -952,7 +971,6 @@ cron.schedule('*/10 * * * * *', async () => {
         await processWalletTransaction({ userId: item.userId, action: 'LIKE', isCreator: true, meta: { refId: item.postId } });
         await processWalletTransaction({ userId: item.actorId, action: 'LIKE', isCreator: false, meta: { refId: item.postId } });
         
-        // Fixed missing parentheses
         await db.client.post.update({ 
           where: { id: item.postId }, 
           data: { likes: { increment: 1 } } 
@@ -962,7 +980,6 @@ cron.schedule('*/10 * * * * *', async () => {
         await processWalletTransaction({ userId: item.userId, action: 'COMMENT', isCreator: true, meta: { refId: item.postId } });
         await processWalletTransaction({ userId: item.actorId, action: 'COMMENT', isCreator: false, meta: { refId: item.postId } });
         
-        // Fixed missing parentheses
         await db.client.post.update({ 
           where: { id: item.postId }, 
           data: { comments: { increment: 1 } } 
@@ -982,16 +999,16 @@ cron.schedule('*/10 * * * * *', async () => {
         }
       }
     } catch (e) {
-      console.error('[Cron Buffer Warning - Item marked for re-queue]', e.message);
+      console.error('[Cron Buffer Warning]', e.message);
       failedItems.push(item);
     }
   }
 
-  // Safely re-queue failed items back to the main buffer
   if (failedItems.length > 0) {
     interactionBuffer.unshift(...failedItems);
   }
 });
+
 cron.schedule('0 0 * * *', async () => {
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
   for (const db of targets) {
@@ -1002,11 +1019,11 @@ cron.schedule('0 0 * * *', async () => {
         const refs = await db.referral.count({ where: { referrerId: user.id, status: 'QUALIFIED' } }).catch(() => 0);
         if (days >= 7 && refs >= 5) {
           await db.user.update({ where: { id: user.id }, data: { monetizeFlag: true, freeFarmingStopped: true } });
-          await sendEmail(user.email, 'Monetization Verification Core Activated!', '🎉 Account system parameters modernized to cash wallet structures.');
+          await sendEmail(user.email, 'Monetization Activated!', '🎉 Account upgraded to cash structures.');
         }
       }
     } catch (err) {
-      console.error('[Midnight Automation Shard Loop Intercepted]', err.message);
+      console.error('[Midnight Cron Error]', err.message);
     }
   }
 });
@@ -1025,7 +1042,7 @@ cron.schedule('*/5 * * * *', async () => {
         }
       }
     } catch (e) {
-      console.error('[Referral Evaluation Trace Error]', e.message);
+      console.error('[Referral Evaluation Error]', e.message);
     }
   }
 });
@@ -1049,10 +1066,11 @@ cron.schedule('0 3 * * *', async () => {
       }
       await c.db.post.deleteMany({ where: { createdAt: { lt: cutoff } } });
     } catch (cronErr) {
-      console.error('[B2 Cron Purge Exception Block Executed Gracefully]', cronErr.message);
+      console.error('[B2 Cron Purge Exception]', cronErr.message);
     }
   }
 });
+
 cron.schedule('*/5 * * * *', async () => {
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
   for (const db of targets) {
@@ -1068,12 +1086,13 @@ cron.schedule('*/5 * * * *', async () => {
     }
   }
 });
-// ========== APP SYSTEM HEALTH ROOT CHECK UP ==========
+
+// ========== HEALTH CHECK UP ==========
 app.get('/', (req, res) => {
   res.status(200).json({ status: "online", core: "GolViral Hardened Engine Infrastructure Matrix", version: "4.5" });
 });
 
-// ========== SERVER INITIATION BOOT STRAPPER ==========
+// ========== START PORT BOOTSTRAP ==========
 app.listen(PORT, () => {
-  console.log(`[SYSTEM BOOT SUCCESSFUL] GolViral Engine 4.5 actively listening on node network interface portal: ${PORT}`);
+  console.log(`[SYSTEM BOOT SUCCESSFUL] Listening on network interface port: ${PORT}`);
 });
