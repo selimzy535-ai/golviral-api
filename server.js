@@ -741,6 +741,77 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
   }
 });
 
+app.get('/api/user/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const db = getDbShard(id);
+
+    const user = await db.client.user.findUnique({
+      where: { id },
+      select: { id: true, username: true, createdAt: true }
+    });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const posts = await db.client.post.findMany({
+      where: { userId: id, status: 'ACTIVE' },
+      select: { id: true, views: true, likes: true }
+    });
+
+    // Search all 3 shards for follow counts since follows can be on any shard
+    let followers = 0, following = 0;
+    const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+
+    for (const shard of dbs) {
+      const f1 = await shard.follow.count({ where: { followingId: id } }).catch(() => 0);
+      const f2 = await shard.follow.count({ where: { followerId: id } }).catch(() => 0);
+      followers += f1;
+      following += f2;
+    }
+
+    const totalViews = posts.reduce((sum, p) => sum + p.views, 0);
+    const totalLikes = posts.reduce((sum, p) => sum + p.likes, 0);
+
+    res.json({
+      userId: id,
+      username: user.username,
+      totalViews,
+      totalLikes,
+      totalPosts: posts.length,
+      followers,
+      following,
+      profileLink: `${APP_BASE_URL}/u/${id}`,
+      referralLink: `${APP_BASE_URL}/auth.html?ref=${id}`
+    });
+  } catch (err) {
+    console.error('[Profile Stats Error]', err.message);
+    res.status(500).json({ error: 'Failed to load profile' });
+  }
+});
+
+app.post('/api/follow', authenticateToken, async (req, res) => {
+  const followerId = req.userId;
+  const { followingId } = req.body;
+  if (followerId === followingId) return res.status(400).json({ error: 'Cannot follow yourself' });
+
+  const db = getDbShard(followingId); // store follow on target user's shard
+
+  try {
+    await db.client.follow.create({ data: { followerId, followingId } });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(400).json({ error: 'Already following' });
+  }
+});
+
+app.post('/api/unfollow', authenticateToken, async (req, res) => {
+  const followerId = req.userId;
+  const { followingId } = req.body;
+  const db = getDbShard(followingId);
+
+  await db.client.follow.deleteMany({ where: { followerId, followingId } });
+  res.json({ success: true });
+});
+
 app.post('/api/wallet/withdraw', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
