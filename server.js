@@ -649,11 +649,25 @@ app.post('/api/read-session', authenticateToken, (req, res) => {
 app.get('/api/feed', async (req, res) => {
   const feed = [];
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
-  
+
   for (const db of targets) {
     try {
       const posts = await db.post.findMany({
         where: { status: 'ACTIVE' },
+        select: { // <-- CRITICAL: must include these fields
+          id: true,
+          userId: true,
+          type: true,
+          title: true,
+          content: true, // <-- for novel/story reader
+          mediaUrl: true, // <-- B2 key only, not URL
+          b2Shard: true, // <-- needed for signing
+          likes: true,
+          comments: true,
+          views: true,
+          score: true,
+          createdAt: true
+        },
         orderBy: { score: 'desc' },
         take: 12
       });
@@ -662,7 +676,7 @@ app.get('/api/feed', async (req, res) => {
       console.error('[Feed Shard Intercepted]', dbErr.message);
     }
   }
-  feed.sort((a, b) => b.score - a.score); 
+  feed.sort((a, b) => b.score - a.score);
   res.json(feed.slice(0, 20));
 });
 
