@@ -699,6 +699,28 @@ app.post('/api/deposit/verify', async (req, res) => {
   }
 });
 
+// ========== MEDIA SIGNING PORT ==========
+const bucketMap = {
+ 0: { client: b2Clients.b2a, bucket: b2Config.a.bucket }, // golviral-videos-a
+ 1: { client: b2Clients.b2b, bucket: b2Config.b.bucket }, // golviral-videos-b
+ 2: { client: b2Clients.b2c, bucket: b2Config.c.bucket } // Golvira-c
+};
+
+app.get('/api/media/sign', authenticateToken, async (req,res)=>{
+  try{
+    const {key, shard} = req.query; // key = mediaUrl from DB, shard = 0/1/2
+    if(!key || shard===undefined) return res.status(400).json({error:'missing params'});
+
+    const {client, bucket} = bucketMap[Number(shard)] || bucketMap[0];
+    const cmd = new GetObjectCommand({Bucket: bucket, Key: key});
+    const url = await getSignedUrl(client, cmd, {expiresIn: 900}); // 15 mins
+    res.json({url});
+  }catch(e){
+    console.error('[Sign Error]', e.message);
+    res.status(500).json({error:'sign failed'});
+  }
+});
+
 app.get('/api/wallet', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
