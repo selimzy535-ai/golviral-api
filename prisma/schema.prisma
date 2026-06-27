@@ -4,23 +4,25 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  url = env("DATABASE_URL")
 }
 
+// ========== MODELS ==========
 model User {
-  id                 String   @id @db.VarChar(16)
-  username           String   @unique @db.VarChar(50)
-  email              String   @unique @db.VarChar(100)
-  password           String   @db.VarChar(255)
-  role               String   @default("user") @db.VarChar(10) // Added to support requireAdmin logic
-  freeCredits        Float    @default(1500)
-  cashBalance        Float    @default(0)
-  monetizeFlag       Boolean  @default(false)
-  freeFarmingStopped Boolean  @default(false)
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  id String @id @db.VarChar(16)
+  username String @unique @db.VarChar(50)
+  email String @unique @db.VarChar(100)
+  password String @db.VarChar(255)
+  role String @default("user") @db.VarChar(10)
+  freeCredits Float @default(1500)
+  cashBalance Float @default(0)
+  monetizeFlag Boolean @default(false)
+  freeFarmingStopped Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  posts   Post[]
+  posts Post[]
+  comments Comment[]
   ledgers PointsLedger[]
   payouts PayoutQueue[]
 
@@ -29,18 +31,45 @@ model User {
   following Follow[] @relation("Following")
 
   // Referral relations
-  referralsMade    Referral[] @relation("Referrer")
-  referralReceived Referral?  @relation("Referee")
+  referralsMade Referral[] @relation("Referrer")
+  referralReceived Referral? @relation("Referee")
 
   @@index([email])
-  @@index([monetizeFlag])
   @@index([username])
+  @@index([monetizeFlag])
+}
+
+model Post {
+  id String @id @db.VarChar(16)
+  userId String @db.VarChar(16)
+  type String @default("reel") @db.VarChar(15)
+  title String @default("") @db.Text
+  content String @default("") @db.Text
+  mediaUrl String @db.Text
+  thumbnailUrl String @db.Text
+  status String @db.VarChar(20) // PRE_UPLOAD, ACTIVE, REJECTED
+  b2Shard Int @default(0)
+  createdAt DateTime @default(now())
+
+  score Float @default(0)
+  likes Int @default(0)
+  comments Int @default(0) // counter
+  views Int @default(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  commentsRel Comment[] // 1:N for fetching
+
+  @@index([userId])
+  @@index([status])
+  @@index([type])
+  @@index([score])
+  @@index([createdAt])
 }
 
 model Comment {
   id String @id @default(cuid())
-  postId String
-  userId String
+  postId String @db.VarChar(16)
+  userId String @db.VarChar(16)
   text String @db.Text
   createdAt DateTime @default(now())
 
@@ -48,58 +77,34 @@ model Comment {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([postId, createdAt])
+  @@index([userId])
 }
 
-model Post {
-  id           String   @id @db.VarChar(16)
-  userId       String   @db.VarChar(16)
-  type         String   @default("reel") @db.VarChar(15) // Added to support 'reel', 'novel', 'story' logic
-  title        String   @default("") @db.Text            // Added to hold novel/story text titles
-  content      String   @default("") @db.Text            // Added to hold novel/story body content
-  mediaUrl     String   @db.Text
-  thumbnailUrl String   @db.Text
-  status       String   @db.VarChar(20)                  // PRE_UPLOAD, ACTIVE, REJECTED
-  b2Shard      Int      @default(0)
-  createdAt    DateTime @default(now())
-
-  score    Float @default(0)
-  likes    Int   @default(0)
-  comments Int   @default(0)
-  views    Int   @default(0)
+model PointsLedger {
+  id Int @id @default(autoincrement())
+  userId String @db.VarChar(16)
+  amount Float
+  type String @db.VarChar(10) // FREE, CASH
+  action String @db.VarChar(30) // LIKE, COMMENT, VIEW_REEL, READ_NOVEL, READ_STORY, REFERRAL_BONUS
+  referenceId String @db.VarChar(64)
+  createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
-  @@index([status])
-  @@index([createdAt])
-  @@index([score])
-  @@index([type])
-}
-
-model PointsLedger {
-  id          Int      @id @default(autoincrement())
-  userId      String   @db.VarChar(16)
-  amount      Float
-  type        String   @db.VarChar(10) // FREE, CASH
-  action      String   @db.VarChar(30) // LIKE, COMMENT, VIEW_REEL, READ_NOVEL, READ_STORY, etc.
-  referenceId String   @db.VarChar(64)
-  createdAt   DateTime @default(now())
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([createdAt])
   @@index([action])
+  @@index([createdAt])
 }
 
 model Referral {
-  id         String   @id @default(uuid())
-  referrerId String   @db.VarChar(16)
-  refereeId  String   @unique @db.VarChar(16)
-  status     String   @db.VarChar(20) // PENDING, QUALIFIED
-  createdAt  DateTime @default(now())
+  id String @id @default(uuid())
+  referrerId String @db.VarChar(16)
+  refereeId String @unique @db.VarChar(16)
+  status String @db.VarChar(20) // PENDING, QUALIFIED
+  createdAt DateTime @default(now())
 
   referrer User @relation("Referrer", fields: [referrerId], references: [id], onDelete: Cascade)
-  referee  User @relation("Referee", fields: [refereeId], references: [id], onDelete: Cascade)
+  referee User @relation("Referee", fields: [refereeId], references: [id], onDelete: Cascade)
 
   @@index([referrerId])
   @@index([status])
@@ -107,15 +112,16 @@ model Referral {
 }
 
 model PayoutQueue {
-  id            String   @id @db.VarChar(16)
-  userId        String   @db.VarChar(16)
-  amountPoints  Float
-  routingTarget String   @db.VarChar(50)
-  targetDetails String   @db.Text
-  status        String   @db.VarChar(20) // PENDING, APPROVED, REJECTED
-  reason        String?  @db.Text
-  createdAt     DateTime @default(now())
-  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id String @id @db.VarChar(16)
+  userId String @db.VarChar(16)
+  amountPoints Float
+  routingTarget String @db.VarChar(50)
+  targetDetails String @db.Text
+  status String @db.VarChar(20) // PENDING, APPROVED, REJECTED
+  reason String? @db.Text
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([status])
@@ -123,12 +129,12 @@ model PayoutQueue {
 }
 
 model Follow {
-  id          String   @id @default(cuid())
-  followerId  String   @db.VarChar(16)
-  followingId String   @db.VarChar(16)
-  createdAt   DateTime @default(now())
+  id String @id @default(cuid())
+  followerId String @db.VarChar(16)
+  followingId String @db.VarChar(16)
+  createdAt DateTime @default(now())
 
-  follower  User @relation("Following", fields: [followerId], references: [id], onDelete: Cascade)
+  follower User @relation("Following", fields: [followerId], references: [id], onDelete: Cascade)
   following User @relation("Followers", fields: [followingId], references: [id], onDelete: Cascade)
 
   @@unique([followerId, followingId])
