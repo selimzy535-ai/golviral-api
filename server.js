@@ -496,7 +496,7 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
     if (!user) return res.status(404).json({ error: 'User mapping vanished inside infrastructure arrays' });
 
-    const fee = (postType === 'novel' || postType === 'story') ? 10 : 25;
+    const fee = (postType === 'novel' || postType === 'story')? 10 : 25;
     if (user.freeCredits < fee) return res.status(400).json({ error: `Insufficient points: Need ${fee} credits` });
 
     const today = new Date().toISOString().split('T')[0];
@@ -504,15 +504,19 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     const postsToday = parseInt(await redis.get(postsKey).catch(() => '0') || '0');
     if (postsToday >= 3) return res.status(429).json({ error: 'Daily posting thresholds violated. Cap = 3/day.' });
 
-    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } } });
+    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } });
 
     const postId = crypto.randomBytes(8).toString('hex');
     const b2 = getB2Shard(userId);
     const key = `media/${postId}.${fileExtension || 'mp4'}`;
 
+    // FIX 3: Allow iPhone.MOV ContentType
+    const allowedTypes = ['video/mp4', 'video/quicktime', 'video/mov'];
+    const ct = allowedTypes.includes(contentType)? contentType : 'video/mp4';
+
     let presignedUrl = "";
     try {
-      const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: contentType || 'video/mp4' });
+      const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: ct });
       presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
     } catch (s3Err) {
       presignedUrl = `https://${b2.bucket}.s3.us-west-000.backblazeb2.com/${key}`;
@@ -525,9 +529,10 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     res.json({ postId, uploadUrl: presignedUrl, objectKey: key });
   } catch (err) {
     res.status(500).json({ error: 'Intent initialization exception caught' });
+  } finally {
+    await redis.del(`lock:${userId}`).catch(() => {});
   }
 });
-
 app.post('/api/post/create', authenticateToken, async (req, res) => {
   const { userId } = req.user;
   const { postId, objectKey, title, content } = req.body;
@@ -548,6 +553,7 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
 
   const localVideoPath = path.join(__dirname, `temp_${postId}.mp4`);
   const localThumbPath = path.join(__dirname, `thumb_${postId}.jpg`);
+  let thumbKey = '';
 
   try {
     const getCmd = new GetObjectCommand({ Bucket: b2.bucket, Key: objectKey });
@@ -555,23 +561,49 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
 
     const writeStream = fs.createWriteStream(localVideoPath);
     s3Object.Body.pipe(writeStream);
-
     await new Promise((resolve, reject) => {
       writeStream.on('finish', resolve);
       writeStream.on('error', reject);
     });
 
-    if (!fs.existsSync(localVideoPath) || fs.statSync(localVideoPath).size > 1.5 * 1024 * 1024) {
+    if (!fs.existsSync(localVideoPath) || fs.statSync(localVideoPath).size > 50 * 1024 * 1024) {
       throw new Error('Size threshold check parameters completely violated');
     }
 
+    // FIX 1: FFmpeg fail-safe. Never crash the post
     await new Promise((resolve) => {
-      exec(`ffmpeg -ss 00:00:01 -i "${localVideoPath}" -vframes 1 -q:v 2 "${localThumbPath}"`, () => {
-        if (!fs.existsSync(localThumbPath)) fs.writeFileSync(localThumbPath, 'placeholder_data');
+      exec(`ffmpeg -ss 00:00:01 -i "${localVideoPath}" -vframes 1 -q:v 2 "${localThumbPath}" -y`, (err) => {
+        if (err ||!fs.existsSync(localThumbPath)) {
+          console.warn('[FFmpeg Failed] Skipping thumb:', err?.message);
+        }
         resolve();
       });
     });
 
+    if (fs.existsSync(localThumbPath)) {
+      thumbKey = `thumbs/${postId}.jpg`;
+      const thumbBuffer = fs.readFileSync(localThumbPath);
+      await b2.client.send(new PutObjectCommand({
+        Bucket: b2.bucket, Key: thumbKey, Body: thumbBuffer, ContentType: 'image/jpeg'
+      })).catch(() => {});
+    }
+
+    // FIX 1: Save B2 keys only, not 7-day signed URLs
+    await db.client.post.update({
+      where: { id: postId },
+      data: { status: 'ACTIVE', mediaUrl: objectKey, thumbnailUrl: thumbKey }
+    });
+
+    res.json({ message: 'Content compilation complete', postId });
+  } catch (err) {
+    await db.client.post.update({ where: { id: postId }, data: { status: 'REJECTED' } }).catch(() => {});
+    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: 25 } }).catch(() => {});
+    res.status(400).json({ error: 'Video compliance failed. Points recovered.' });
+  } finally {
+    if (fs.existsSync(localVideoPath)) fs.unlinkSync(localVideoPath);
+    if (fs.existsSync(localThumbPath)) fs.unlinkSync(localThumbPath);
+  }
+});
     const thumbKey = `thumbs/${postId}.jpg`;
     if (fs.existsSync(localThumbPath)) {
       const thumbBuffer = fs.readFileSync(localThumbPath);
@@ -678,6 +710,32 @@ app.get('/api/feed', async (req, res) => {
   }
   feed.sort((a, b) => b.score - a.score);
   res.json(feed.slice(0, 20));
+});
+
+app.get('/api/post/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const target = await findPostAcrossShards(id);
+    
+    if (!target || target.post.status!== 'ACTIVE') {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    res.json({
+      id: target.post.id,
+      userId: target.post.userId,
+      type: target.post.type,
+      title: target.post.title,
+      content: target.post.content,
+      mediaUrl: target.post.mediaUrl, // B2 key only
+      b2Shard: target.post.b2Shard, // 0,1,2 for signing
+      likes: target.post.likes,
+      comments: target.post.comments,
+      views: target.post.views
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Post load failed' });
+  }
 });
 
 // ========== PAYMENT & WALLET SYSTEMS ==========
@@ -922,11 +980,15 @@ app.post('/api/admin/posts/:id/reject', requireAdmin, async (req, res) => {
   const { id } = req.params;
   const target = await findPostAcrossShards(id);
   if (!target) return res.status(404).json({ error: 'Post not found across infrastructure shards' });
+  
+  // FIX 2: Refund correct amount
+  const refundAmount = target.post.type === 'reel'? 25 : 10;
+  
   await target.db.$transaction([
     target.db.post.update({ where: { id }, data: { status: 'REJECTED' } }),
-    target.db.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: 25 } } })
+    target.db.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } })
   ]);
-  res.json({ success: true });
+  res.json({ success: true, refunded: refundAmount });
 });
 
 app.post('/api/admin/verify-gate', async (req, res) => {
