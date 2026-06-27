@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -504,14 +505,12 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     const postsToday = parseInt(await redis.get(postsKey).catch(() => '0') || '0');
     if (postsToday >= 3) return res.status(429).json({ error: 'Daily posting thresholds violated. Cap = 3/day.' });
 
-    // FIX: Added the missing closing parenthesis here
     await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } } });
 
     const postId = crypto.randomBytes(8).toString('hex');
     const b2 = getB2Shard(userId);
     const key = `media/${postId}.${fileExtension || 'mp4'}`;
 
-    // FIX 3: Allow iPhone.MOV ContentType
     const allowedTypes = ['video/mp4', 'video/quicktime', 'video/mov'];
     const ct = allowedTypes.includes(contentType) ? contentType : 'video/mp4';
 
@@ -534,6 +533,7 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     await redis.del(`lock:${userId}`).catch(() => {});
   }
 });
+
 app.post('/api/post/create', authenticateToken, async (req, res) => {
   const { userId } = req.user;
   const { postId, objectKey, title, content } = req.body;
@@ -571,7 +571,6 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
       throw new Error('Size threshold check parameters completely violated');
     }
 
-    // FIX 1: FFmpeg fail-safe. Never crash the post
     await new Promise((resolve) => {
       exec(`ffmpeg -ss 00:00:01 -i "${localVideoPath}" -vframes 1 -q:v 2 "${localThumbPath}" -y`, (err) => {
         if (err || !fs.existsSync(localThumbPath)) {
@@ -589,7 +588,6 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
       })).catch(() => {});
     }
 
-    // FIX 1: Save B2 keys only, not 7-day signed URLs
     await db.client.post.update({
       where: { id: postId },
       data: { status: 'ACTIVE', mediaUrl: objectKey, thumbnailUrl: thumbKey }
@@ -598,7 +596,6 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
     res.json({ message: 'Content compilation complete', postId });
   } catch (err) {
     await db.client.post.update({ where: { id: postId }, data: { status: 'REJECTED' } }).catch(() => {});
-    // Typo fixed below: added the missing closing curly brace for the data object
     await db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: 25 } } }).catch(() => {});
     res.status(400).json({ error: 'Video compliance failed. Points recovered.' });
   } finally {
@@ -606,7 +603,7 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
     if (fs.existsSync(localThumbPath)) fs.unlinkSync(localThumbPath);
   }
 });
-    
+
 // ========== LIVE TRACKING & FEED PORTS ==========
 app.post('/api/view', (req, res) => {
   const { postId, userId, viewerId, viewerIp } = req.body;
@@ -626,9 +623,9 @@ app.post('/api/like', authenticateToken, (req, res) => {
 
 app.post('/api/comment', authenticateToken, async (req, res) => {
   try {
-    const { postId, creatorId, text } = req.body; // <- now takes text
-    const actorId = req.userId;
-    if (!postId ||!creatorId ||!text || text.trim().length < 2) {
+    const { postId, creatorId, text } = req.body;
+    const actorId = req.user.userId; // FIX: Access from nested req.user setup
+    if (!postId || !creatorId || !text || text.trim().length < 2) {
       return res.status(400).json({ error: 'Invalid comment payload' });
     }
 
@@ -638,10 +635,9 @@ app.post('/api/comment', authenticateToken, async (req, res) => {
 
     await redis.set(`cool:comment:${actorId}`, '1', 'EX', 120).catch(() => {});
 
-    // Save comment to DB in correct shard
     const db = getDbShard(creatorId);
     await db.client.comment.create({
-      data: { postId, userId: actorId, text: text.trim().slice(0, 500) } // 500 char max
+      data: { postId, userId: actorId, text: text.trim().slice(0, 500) }
     });
 
     interactionBuffer.push({ type: 'COMMENT', postId, userId: creatorId, actorId, timestamp: Date.now() });
@@ -652,7 +648,7 @@ app.post('/api/comment', authenticateToken, async (req, res) => {
   }
 });
 
-  app.get('/api/comments/:postId', async (req, res) => {
+app.get('/api/comments/:postId', async (req, res) => {
   try {
     const { postId } = req.params;
     const { page = 1, limit = 20 } = req.query;
@@ -675,7 +671,8 @@ app.post('/api/comment', authenticateToken, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to load comments' });
   }
-});       
+});      
+
 app.post('/api/read-session', authenticateToken, (req, res) => {
   const { contentId, authorId, contentType } = req.body;
   if (contentId && authorId && contentType) {
@@ -692,14 +689,14 @@ app.get('/api/feed', async (req, res) => {
     try {
       const posts = await db.post.findMany({
         where: { status: 'ACTIVE' },
-        select: { // <-- CRITICAL: must include these fields
+        select: {
           id: true,
           userId: true,
           type: true,
           title: true,
-          content: true, // <-- for novel/story reader
-          mediaUrl: true, // <-- B2 key only, not URL
-          b2Shard: true, // <-- needed for signing
+          content: true,
+          mediaUrl: true,
+          b2Shard: true,
           likes: true,
           comments: true,
           views: true,
@@ -723,7 +720,7 @@ app.get('/api/post/:id', async (req, res) => {
     const { id } = req.params;
     const target = await findPostAcrossShards(id);
     
-    if (!target || target.post.status!== 'ACTIVE') {
+    if (!target || target.post.status !== 'ACTIVE') {
       return res.status(404).json({ error: 'Post not found' });
     }
 
@@ -733,8 +730,8 @@ app.get('/api/post/:id', async (req, res) => {
       type: target.post.type,
       title: target.post.title,
       content: target.post.content,
-      mediaUrl: target.post.mediaUrl, // B2 key only
-      b2Shard: target.post.b2Shard, // 0,1,2 for signing
+      mediaUrl: target.post.mediaUrl,
+      b2Shard: target.post.b2Shard,
       likes: target.post.likes,
       comments: target.post.comments,
       views: target.post.views
@@ -779,19 +776,19 @@ app.post('/api/deposit/verify', async (req, res) => {
 
 // ========== MEDIA SIGNING PORT ==========
 const bucketMap = {
- 0: { client: b2Clients.b2a, bucket: b2Config.a.bucket }, // golviral-videos-a
- 1: { client: b2Clients.b2b, bucket: b2Config.b.bucket }, // golviral-videos-b
- 2: { client: b2Clients.b2c, bucket: b2Config.c.bucket } // Golvira-c
+ 0: { client: b2Clients.b2a, bucket: b2Config.a.bucket },
+ 1: { client: b2Clients.b2b, bucket: b2Config.b.bucket },
+ 2: { client: b2Clients.b2c, bucket: b2Config.c.bucket }
 };
 
 app.get('/api/media/sign', authenticateToken, async (req,res)=>{
   try{
-    const {key, shard} = req.query; // key = mediaUrl from DB, shard = 0/1/2
+    const {key, shard} = req.query;
     if(!key || shard===undefined) return res.status(400).json({error:'missing params'});
 
     const {client, bucket} = bucketMap[Number(shard)] || bucketMap[0];
     const cmd = new GetObjectCommand({Bucket: bucket, Key: key});
-    const url = await getSignedUrl(client, cmd, {expiresIn: 900}); // 15 mins
+    const url = await getSignedUrl(client, cmd, {expiresIn: 900});
     res.json({url});
   }catch(e){
     console.error('[Sign Error]', e.message);
@@ -987,12 +984,11 @@ app.post('/api/admin/posts/:id/reject', requireAdmin, async (req, res) => {
   const target = await findPostAcrossShards(id);
   if (!target) return res.status(404).json({ error: 'Post not found across infrastructure shards' });
   
-  // FIX 2: Refund correct amount
-  const refundAmount = target.post.type === 'reel'? 25 : 10;
+  const refundAmount = target.post.type === 'reel' ? 25 : 10;
   
   await target.db.$transaction([
     target.db.post.update({ where: { id }, data: { status: 'REJECTED' } }),
-    target.db.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } })
+    target.db.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } }) // FIX: Fixed dangling syntax bracket
   ]);
   res.json({ success: true, refunded: refundAmount });
 });
