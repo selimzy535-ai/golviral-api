@@ -504,7 +504,7 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     const postsToday = parseInt(await redis.get(postsKey).catch(() => '0') || '0');
     if (postsToday >= 3) return res.status(429).json({ error: 'Daily posting thresholds violated. Cap = 3/day.' });
 
-    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } });
+    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } } });
 
     const postId = crypto.randomBytes(8).toString('hex');
     const b2 = getB2Shard(userId);
