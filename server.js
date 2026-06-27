@@ -604,36 +604,7 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
     if (fs.existsSync(localThumbPath)) fs.unlinkSync(localThumbPath);
   }
 });
-    const thumbKey = `thumbs/${postId}.jpg`;
-    if (fs.existsSync(localThumbPath)) {
-      const thumbBuffer = fs.readFileSync(localThumbPath);
-      await b2.client.send(new PutObjectCommand({
-        Bucket: b2.bucket, Key: thumbKey, Body: thumbBuffer, ContentType: 'image/jpeg'
-      })).catch(() => {});
-    }
-
-    const finalCmdVideo = new GetObjectCommand({ Bucket: b2.bucket, Key: objectKey });
-    const finalCmdThumb = new GetObjectCommand({ Bucket: b2.bucket, Key: thumbKey });
-
-    const mediaPlaybackUrl = await getSignedUrl(b2.client, finalCmdVideo, { expiresIn: 604800 }).catch(() => `https://${b2.bucket}.b2.com/${objectKey}`);
-    const thumbPlaybackUrl = await getSignedUrl(b2.client, finalCmdThumb, { expiresIn: 604800 }).catch(() => `https://${b2.bucket}.b2.com/${thumbKey}`);
-
-    await db.client.post.update({
-      where: { id: postId },
-      data: { status: 'ACTIVE', mediaUrl: mediaPlaybackUrl, thumbnailUrl: thumbPlaybackUrl }
-    });
-
-    res.json({ message: 'Content compilation complete', postId, mediaUrl: mediaPlaybackUrl, thumbnailUrl: thumbPlaybackUrl });
-  } catch (err) {
-    await db.client.post.update({ where: { id: postId }, data: { status: 'REJECTED' } }).catch(() => {});
-    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: 25 } } }).catch(() => {});
-    res.status(400).json({ error: 'Video compliance failed. Points recovered.' });
-  } finally {
-    if (fs.existsSync(localVideoPath)) fs.unlinkSync(localVideoPath);
-    if (fs.existsSync(localThumbPath)) fs.unlinkSync(localThumbPath);
-  }
-});
-
+    
 // ========== LIVE TRACKING & FEED PORTS ==========
 app.post('/api/view', (req, res) => {
   const { postId, userId, viewerId, viewerIp } = req.body;
