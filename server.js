@@ -574,7 +574,7 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
     // FIX 1: FFmpeg fail-safe. Never crash the post
     await new Promise((resolve) => {
       exec(`ffmpeg -ss 00:00:01 -i "${localVideoPath}" -vframes 1 -q:v 2 "${localThumbPath}" -y`, (err) => {
-        if (err ||!fs.existsSync(localThumbPath)) {
+        if (err || !fs.existsSync(localThumbPath)) {
           console.warn('[FFmpeg Failed] Skipping thumb:', err?.message);
         }
         resolve();
@@ -598,7 +598,8 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
     res.json({ message: 'Content compilation complete', postId });
   } catch (err) {
     await db.client.post.update({ where: { id: postId }, data: { status: 'REJECTED' } }).catch(() => {});
-    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: 25 } }).catch(() => {});
+    // Typo fixed below: added the missing closing curly brace for the data object
+    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: 25 } } }).catch(() => {});
     res.status(400).json({ error: 'Video compliance failed. Points recovered.' });
   } finally {
     if (fs.existsSync(localVideoPath)) fs.unlinkSync(localVideoPath);
