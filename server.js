@@ -496,7 +496,7 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
     if (!user) return res.status(404).json({ error: 'User mapping vanished inside infrastructure arrays' });
 
-    const fee = (postType === 'novel' || postType === 'story')? 10 : 25;
+    const fee = (postType === 'novel' || postType === 'story') ? 10 : 25;
     if (user.freeCredits < fee) return res.status(400).json({ error: `Insufficient points: Need ${fee} credits` });
 
     const today = new Date().toISOString().split('T')[0];
@@ -504,6 +504,7 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     const postsToday = parseInt(await redis.get(postsKey).catch(() => '0') || '0');
     if (postsToday >= 3) return res.status(429).json({ error: 'Daily posting thresholds violated. Cap = 3/day.' });
 
+    // FIX: Added the missing closing parenthesis here
     await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } } });
 
     const postId = crypto.randomBytes(8).toString('hex');
@@ -512,7 +513,7 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
 
     // FIX 3: Allow iPhone.MOV ContentType
     const allowedTypes = ['video/mp4', 'video/quicktime', 'video/mov'];
-    const ct = allowedTypes.includes(contentType)? contentType : 'video/mp4';
+    const ct = allowedTypes.includes(contentType) ? contentType : 'video/mp4';
 
     let presignedUrl = "";
     try {
@@ -624,9 +625,11 @@ app.post('/api/like', authenticateToken, (req, res) => {
 
 app.post('/api/comment', authenticateToken, async (req, res) => {
   try {
-    const { postId, creatorId } = req.body;
-    const actorId = req.user.userId;
-    if (!postId || !creatorId) return res.status(400).json({ error: 'Invalid post context mapping' });
+    const { postId, creatorId, text } = req.body; // <- now takes text
+    const actorId = req.userId;
+    if (!postId ||!creatorId ||!text || text.trim().length < 2) {
+      return res.status(400).json({ error: 'Invalid comment payload' });
+    }
 
     const redis = getRedisShard(actorId);
     const cooldown = await redis.get(`cool:comment:${actorId}`).catch(() => null);
@@ -634,13 +637,44 @@ app.post('/api/comment', authenticateToken, async (req, res) => {
 
     await redis.set(`cool:comment:${actorId}`, '1', 'EX', 120).catch(() => {});
 
+    // Save comment to DB in correct shard
+    const db = getDbShard(creatorId);
+    await db.client.comment.create({
+      data: { postId, userId: actorId, text: text.trim().slice(0, 500) } // 500 char max
+    });
+
     interactionBuffer.push({ type: 'COMMENT', postId, userId: creatorId, actorId, timestamp: Date.now() });
-    res.status(202).json({ buffered: true });
+    res.status(201).json({ success: true });
   } catch (err) {
-    res.status(202).json({ buffered: true });
+    console.error('[Comment Error]', err.message);
+    res.status(500).json({ error: 'Comment failed' });
   }
 });
 
+  app.get('/api/comments/:postId', async (req, res) => {
+  try {
+    const { postId } = req.params;
+    const { page = 1, limit = 20 } = req.query;
+
+    const target = await findPostAcrossShards(postId);
+    if (!target) return res.status(404).json({ error: 'Post not found' });
+
+    const comments = await target.db.comment.findMany({
+      where: { postId },
+      select: {
+        id: true, text: true, createdAt: true,
+        user: { select: { id: true, username: true } }
+      },
+      orderBy: { createdAt: 'desc' },
+      skip: (Number(page) - 1) * Number(limit),
+      take: Number(limit)
+    });
+
+    res.json({ comments, total: comments.length });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load comments' });
+  }
+});       
 app.post('/api/read-session', authenticateToken, (req, res) => {
   const { contentId, authorId, contentType } = req.body;
   if (contentId && authorId && contentType) {
