@@ -37,6 +37,19 @@ model User {
   @@index([username])
 }
 
+model Comment {
+  id String @id @default(cuid())
+  postId String
+  userId String
+  text String @db.Text
+  createdAt DateTime @default(now())
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([postId, createdAt])
+}
+
 model Post {
   id           String   @id @db.VarChar(16)
   userId       String   @db.VarChar(16)
