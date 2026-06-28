@@ -920,19 +920,20 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
   }
 });
 
-app.get('/api/user/:id', async (req, res) => {
+app.get('/api/user/:id', authenticateToken, async (req, res) => {
   try {
-    const { id } = req.params;
-    const db = getDbShard(id);
+    const { id: targetId } = req.params;
+    const meId = req.userId;
+    const db = getDbShard(targetId);
 
     const user = await db.client.user.findUnique({
-      where: { id },
+      where: { id: targetId },
       select: { id: true, username: true, createdAt: true }
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const posts = await db.client.post.findMany({
-      where: { userId: id, status: 'ACTIVE' },
+      where: { userId: targetId, status: 'ACTIVE' },
       select: { id: true, views: true, likes: true }
     });
 
@@ -940,25 +941,37 @@ app.get('/api/user/:id', async (req, res) => {
     const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
 
     for (const shard of dbs) {
-      const f1 = await shard.follow.count({ where: { followingId: id } }).catch(() => 0);
-      const f2 = await shard.follow.count({ where: { followerId: id } }).catch(() => 0);
+      const f1 = await shard.follow.count({ where: { followingId: targetId } }).catch(() => 0);
+      const f2 = await shard.follow.count({ where: { followerId: targetId } }).catch(() => 0);
       followers += f1;
       following += f2;
+    }
+
+    // ===== NEW: Check if ME follows TARGET =====
+    let isFollowing = false;
+    if(meId !== targetId){
+      for (const shard of dbs) {
+        const rel = await shard.follow.findFirst({ 
+          where: { followerId: meId, followingId: targetId } 
+        }).catch(() => null);
+        if(rel) { isFollowing = true; break; }
+      }
     }
 
     const totalViews = posts.reduce((sum, p) => sum + p.views, 0);
     const totalLikes = posts.reduce((sum, p) => sum + p.likes, 0);
 
     res.json({
-      userId: id,
+      userId: targetId,
       username: user.username,
       totalViews,
       totalLikes,
       totalPosts: posts.length,
       followers,
       following,
-      profileLink: `${APP_BASE_URL}/u/${id}`,
-      referralLink: `${APP_BASE_URL}/auth.html?ref=${id}`
+      isFollowing, // <-- NEW FLAG FOR FRONTEND
+      profileLink: `${APP_BASE_URL}/u/${targetId}`,
+      referralLink: `${APP_BASE_URL}/auth.html?ref=${targetId}`
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load profile' });
