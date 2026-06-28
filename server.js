@@ -742,36 +742,122 @@ app.get('/api/post/:id', async (req, res) => {
 });
 
 // ========== PAYMENT & WALLET SYSTEMS ==========
-app.post('/api/deposit/verify', async (req, res) => {
+
+// 1. INIT: Lock the amount + create token BEFORE user pays
+app.post('/api/deposit/init', authenticateToken, async (req, res) => {
   try {
-    const { userId, reference, tierAmount, passToken } = req.body;
-    if (!(await internalVerifyPassToken(passToken))) {
-      return res.status(400).json({ error: 'Math verification sequence missing' });
-    }
+    const { userId } = req.user;
+    const { tierAmount } = req.body; // 1500, 3000, 5000, 7000, 10000, 15000
 
+    // HARD LOCK: Only these 6 amounts allowed. No 500, no fake amounts.
+    const tiers = {
+      1500: 15000,
+      3000: 30000,
+      5000: 50000,
+      7000: 70000,
+      10000: 100000,
+      15000: 150000
+    };
+
+    const points = tiers[tierAmount];
+    if (!points) return res.status(400).json({ error: 'Invalid tier amount' });
+
+    const token = crypto.randomBytes(16).toString('hex');
     const db = getDbShard(userId);
-    const selarCheck = await axios.get(`https://api.selar.co/merchant/v1/payments/verify/${reference}`, {
-      headers: { 'Authorization': `Bearer ${process.env.SELAR_SECRET_KEY || 'fallback'}` }
-    }).catch(() => null);
 
-    if (!selarCheck || selarCheck.data.status !== 'success') {
-      console.warn(`[Selar Verification Skipped/Failed] Testing parameters used for fallback reference: ${reference}`);
-    }
-
-    let creditYield = 0;
-    const tiers = { 500: 5000, 1500: 15000, 3000: 30000, 5000: 50000, 7000: 70000, 10000: 100000, 15000: 150000 };
-    creditYield = tiers[tierAmount] || 0;
-
-    if (creditYield === 0) return res.status(400).json({ error: 'Unrecognized payment tier structure' });
-
-    await db.client.user.update({
-      where: { id: userId }, data: { freeCredits: { increment: creditYield } }
+    // Lock it in DB. This is the proof. No credit yet.
+    await db.client.deposit.create({
+      data: {
+        id: crypto.randomBytes(8).toString('hex'),
+        userId,
+        amountNaira: tierAmount,
+        points,
+        token,
+        status: 'PENDING',
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000) // 30min to pay
+      }
     });
 
-    res.json({ success: true, balance: creditYield });
+    res.json({
+      selarLink: `https://selar.co/m/YOUR_STORE_SLUG/${tierAmount}`, // <- CHANGE YOUR_STORE_SLUG
+      token
+    });
   } catch (err) {
-    res.status(500).json({ error: 'Deposit core exception caught' });
+    console.error('[Deposit Init Error]', err.message);
+    res.status(500).json({ error: 'Deposit init failed' });
   }
+});
+
+// 2. VERIFY: Only credit if token is valid + tx_ref is new
+app.post('/api/deposit/verify', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.user;
+    const { tx_ref, token, passToken } = req.body; // tx_ref comes from Selar redirect URL
+
+    if (!(await internalVerifyPassToken(passToken))) {
+      return res.status(400).json({ error: 'Math verification failed' });
+    }
+    if (!tx_ref ||!token) return res.status(400).json({ error: 'Missing tx_ref or token' });
+
+    const db = getDbShard(userId);
+
+    // Check 1: Token must exist, PENDING, owned by user, not expired
+    const deposit = await db.client.deposit.findFirst({
+      where: {
+        userId,
+        token,
+        status: 'PENDING',
+        expiresAt: { gt: new Date() }
+      }
+    });
+    if (!deposit) return res.status(400).json({ error: 'Invalid or expired ticket' });
+
+    // Check 2: tx_ref must not be used before = prevents double spend/replay
+    const usedTx = await db.client.deposit.findFirst({
+      where: { reference: tx_ref, status: 'SUCCESS' }
+    });
+    if (usedTx) return res.status(400).json({ error: 'Payment already redeemed' });
+
+    // All good. Credit user and burn the ticket.
+    await db.client.$transaction([
+      db.client.deposit.update({
+        where: { id: deposit.id },
+        data: { reference: tx_ref, status: 'SUCCESS' }
+      }),
+      db.client.user.update({
+        where: { id: userId },
+        data: { freeCredits: { increment: deposit.points } }
+      }),
+      db.client.pointsLedger.create({
+        data: {
+          userId,
+          amount: deposit.points,
+          type: 'FREE',
+          action: 'DEPOSIT',
+          referenceId: tx_ref
+        }
+      })
+    ]);
+
+    res.json({ success: true, credited: deposit.points });
+  } catch (err) {
+    console.error('[Deposit Verify Error]', err.message);
+    res.status(500).json({ error: 'Deposit verification failed' });
+  }
+});
+
+// 3. ADMIN: View all deposits to catch fraud
+app.get('/api/admin/deposits', requireAdmin, async (req, res) => {
+  const all = [];
+  for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
+    const deposits = await db.deposit.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+      include: { user: { select: { username: true, email: true } }
+    }).catch(() => []);
+    all.push(...deposits);
+  }
+  res.json(all);
 });
 
 // ========== MEDIA SIGNING PORT ==========
