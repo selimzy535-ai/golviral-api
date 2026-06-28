@@ -509,17 +509,26 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
 
     const postId = crypto.randomBytes(8).toString('hex');
     const b2 = getB2Shard(userId);
-    const key = `media/${postId}.${fileExtension || 'mp4'}`;
 
+    // ===== FIX START: iPhone.MOV Support =====
     const allowedTypes = ['video/mp4', 'video/quicktime', 'video/mov'];
     const ct = allowedTypes.includes(contentType) ? contentType : 'video/mp4';
+
+    // If frontend didn't send ext, derive it from mime
+    let ext = fileExtension;
+    if (!ext) {
+      ext = ct === 'video/quicktime' ? 'mov' : 'mp4';
+    }
+    const key = `media/${postId}.${ext}`;
+    // ===== FIX END =====
 
     let presignedUrl = "";
     try {
       const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: ct });
-      presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
+      presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 }); // 1hr to upload
     } catch (s3Err) {
-      presignedUrl = `https://${b2.bucket}.s3.us-west-000.backblazeb2.com/${key}`;
+      console.error('[B2 Sign Fail]', s3Err.message);
+      return res.status(500).json({ error: 'B2 presign failed' });
     }
 
     await db.client.post.create({
@@ -528,6 +537,7 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
 
     res.json({ postId, uploadUrl: presignedUrl, objectKey: key });
   } catch (err) {
+    console.error('[Intent Error]', err.message);
     res.status(500).json({ error: 'Intent initialization exception caught' });
   } finally {
     await redis.del(`lock:${userId}`).catch(() => {});
