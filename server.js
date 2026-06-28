@@ -797,7 +797,7 @@ app.post('/api/deposit/verify', authenticateToken, async (req, res) => {
     if (!(await internalVerifyPassToken(passToken))) {
       return res.status(400).json({ error: 'Math verification failed' });
     }
-    if (!tx_ref ||!token) return res.status(400).json({ error: 'Missing tx_ref or token' });
+    if (!tx_ref || !token) return res.status(400).json({ error: 'Missing tx_ref or token' });
 
     const db = getDbShard(userId);
 
@@ -853,7 +853,7 @@ app.get('/api/admin/deposits', requireAdmin, async (req, res) => {
     const deposits = await db.deposit.findMany({
       orderBy: { createdAt: 'desc' },
       take: 100,
-      include: { user: { select: { username: true, email: true } }
+      include: { user: { select: { username: true, email: true } } }
     }).catch(() => []);
     all.push(...deposits);
   }
