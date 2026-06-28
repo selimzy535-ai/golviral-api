@@ -25,6 +25,7 @@ model User {
   comments Comment[]
   ledgers PointsLedger[]
   payouts PayoutQueue[]
+  deposits Deposit[] // Added relation for sharding
 
   // Follow relations
   followers Follow[] @relation("Followers")
@@ -39,22 +40,42 @@ model User {
   @@index([monetizeFlag])
 }
 
+model Deposit {
+  id String @id @default(cuid())
+  userId String @db.VarChar(16) // FIX: Must match User.id length for sharding
+  amountNaira Int
+  points Int
+  token String @unique // Used to prevent direct /verify spam
+  reference String @unique @default("") // Selar tx_ref. Prevents replay attacks
+  status String @default("PENDING") // PENDING, SUCCESS, FAILED, EXPIRED
+  createdAt DateTime @default(now())
+  expiresAt DateTime // 30min lock after /init
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade) // FIX: Required for Admin include
+
+  @@index([userId])
+  @@index([token])
+  @@index([reference])
+  @@index([status])
+  @@index([createdAt])
+}
+
 model Post {
   id String @id @db.VarChar(16)
   userId String @db.VarChar(16)
-  type String @default("reel") @db.VarChar(15)
+  type String @default("reel") @db.VarChar(15) // reel, novel, story
   title String @default("") @db.Text
   content String @default("") @db.Text
-  mediaUrl String @db.Text
-  thumbnailUrl String @db.Text
+  mediaUrl String @db.Text // B2 key
+  thumbnailUrl String @db.Text // B2 key
   status String @db.VarChar(20) // PRE_UPLOAD, ACTIVE, REJECTED
-  b2Shard Int @default(0)
-  createdAt DateTime @default(now())
+  b2Shard Int @default(0) // 0, 1, 2 for B2 routing
 
   score Float @default(0)
   likes Int @default(0)
-  comments Int @default(0) // counter
+  comments Int @default(0) // counter cache
   views Int @default(0)
+  createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   commentsRel Comment[] // 1:N for fetching
@@ -85,8 +106,8 @@ model PointsLedger {
   userId String @db.VarChar(16)
   amount Float
   type String @db.VarChar(10) // FREE, CASH
-  action String @db.VarChar(30) // LIKE, COMMENT, VIEW_REEL, READ_NOVEL, READ_STORY, REFERRAL_BONUS
-  referenceId String @db.VarChar(64)
+  action String @db.VarChar(30) // LIKE, COMMENT, VIEW_REEL, READ_NOVEL, READ_STORY, REFERRAL_BONUS, DEPOSIT
+  referenceId String @db.VarChar(64) // postId, tx_ref, etc
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -115,8 +136,8 @@ model PayoutQueue {
   id String @id @db.VarChar(16)
   userId String @db.VarChar(16)
   amountPoints Float
-  routingTarget String @db.VarChar(50)
-  targetDetails String @db.Text
+  routingTarget String @db.VarChar(50) // BANK, USDT, etc
+  targetDetails String @db.Text // Account number, wallet addr
   status String @db.VarChar(20) // PENDING, APPROVED, REJECTED
   reason String? @db.Text
   createdAt DateTime @default(now())
