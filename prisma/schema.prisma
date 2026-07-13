@@ -18,6 +18,9 @@ model User {
   cashBalance Float @default(0)
   monetizeFlag Boolean @default(false)
   freeFarmingStopped Boolean @default(false)
+  isVerified Boolean @default(false) // NEW: For DM unlock badge
+  dmUnlocked Boolean @default(false) // NEW: For DM gate
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -25,7 +28,10 @@ model User {
   comments Comment[]
   ledgers PointsLedger[]
   payouts PayoutQueue[]
-  deposits Deposit[] // Added relation for sharding
+  deposits Deposit[]
+  messagesSent Message[] @relation("SentMessages") // NEW
+  messagesReceived Message[] @relation("ReceivedMessages") // NEW
+  gifts Gift[] // NEW
 
   // Follow relations
   followers Follow[] @relation("Followers")
@@ -42,16 +48,17 @@ model User {
 
 model Deposit {
   id String @id @default(cuid())
-  userId String @db.VarChar(16) // FIX: Must match User.id length for sharding
+  userId String @db.VarChar(16)
   amountNaira Int
   points Int
-  token String @unique // Used to prevent direct /verify spam
-  reference String @unique @default("") // Selar tx_ref. Prevents replay attacks
-  status String @default("PENDING") // PENDING, SUCCESS, FAILED, EXPIRED
+  token String @unique
+  reference String @unique @default("")
+  status String @default("PENDING")
+  meta String @default("DEPOSIT") @db.VarChar(50) // NEW: DEPOSIT, DM_UNLOCK, GIFT_RUBY
   createdAt DateTime @default(now())
-  expiresAt DateTime // 30min lock after /init
+  expiresAt DateTime
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade) // FIX: Required for Admin include
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([token])
@@ -63,22 +70,22 @@ model Deposit {
 model Post {
   id String @id @db.VarChar(16)
   userId String @db.VarChar(16)
-  type String @default("reel") @db.VarChar(15) // reel, novel, story
+  type String @default("reel") @db.VarChar(15)
   title String @default("") @db.Text
   content String @default("") @db.Text
-  mediaUrl String @db.Text // B2 key
-  thumbnailUrl String @db.Text // B2 key
-  status String @db.VarChar(20) // PRE_UPLOAD, ACTIVE, REJECTED
-  b2Shard Int @default(0) // 0, 1, 2 for B2 routing
+  mediaUrl String @db.Text
+  thumbnailUrl String @db.Text
+  status String @db.VarChar(20)
+  b2Shard Int @default(0)
 
   score Float @default(0)
   likes Int @default(0)
-  comments Int @default(0) // counter cache
+  comments Int @default(0)
   views Int @default(0)
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  commentsRel Comment[] // 1:N for fetching
+  commentsRel Comment[]
 
   @@index([userId])
   @@index([status])
@@ -105,9 +112,9 @@ model PointsLedger {
   id Int @id @default(autoincrement())
   userId String @db.VarChar(16)
   amount Float
-  type String @db.VarChar(10) // FREE, CASH
-  action String @db.VarChar(30) // LIKE, COMMENT, VIEW_REEL, READ_NOVEL, READ_STORY, REFERRAL_BONUS, DEPOSIT
-  referenceId String @db.VarChar(64) // postId, tx_ref, etc
+  type String @db.VarChar(10)
+  action String @db.VarChar(30)
+  referenceId String @db.VarChar(64)
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -121,7 +128,7 @@ model Referral {
   id String @id @default(uuid())
   referrerId String @db.VarChar(16)
   refereeId String @unique @db.VarChar(16)
-  status String @db.VarChar(20) // PENDING, QUALIFIED
+  status String @db.VarChar(20)
   createdAt DateTime @default(now())
 
   referrer User @relation("Referrer", fields: [referrerId], references: [id], onDelete: Cascade)
@@ -136,9 +143,9 @@ model PayoutQueue {
   id String @id @db.VarChar(16)
   userId String @db.VarChar(16)
   amountPoints Float
-  routingTarget String @db.VarChar(50) // BANK, USDT, etc
-  targetDetails String @db.Text // Account number, wallet addr
-  status String @db.VarChar(20) // PENDING, APPROVED, REJECTED
+  routingTarget String @db.VarChar(50)
+  targetDetails String @db.Text
+  status String @db.VarChar(20)
   reason String? @db.Text
   createdAt DateTime @default(now())
 
@@ -162,4 +169,37 @@ model Follow {
   @@index([followerId])
   @@index([followingId])
   @@index([createdAt])
+}
+
+// ========== NEW MODELS FOR V4.6 ==========
+model Message {
+  id String @id @db.VarChar(16)
+  senderId String @db.VarChar(16)
+  receiverId String @db.VarChar(16)
+  text String @db.Text
+  createdAt DateTime @default(now())
+
+  sender User @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([senderId])
+  @@index([receiverId])
+  @@index([createdAt])
+}
+
+model Gift {
+  id String @id @db.VarChar(16)
+  buyerId String @db.VarChar(16)
+  giftType String @db.VarChar(20) // RUBY, GOLD, DIAMOND
+  price Int // NGN
+  pointsPerGift Int
+  giftsSent Int @default(0)
+  giftsTotal Int @default(100)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  buyer User @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+
+  @@index([buyerId])
+  @@index([expiresAt])
 }
