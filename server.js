@@ -828,29 +828,23 @@ app.get('/api/post/:id', async (req, res) => {
 
 // ========== PAYMENT & WALLET SYSTEMS ==========
 
-// 1. INIT: Lock the amount + create token BEFORE user pays
 app.post('/api/deposit/init', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
-    const { tierAmount } = req.body; // 1500, 3000, 5000, 7000, 10000, 15000
+    const { tierAmount } = req.body; // 1500, 7000
 
-    // HARD LOCK: Only these 6 amounts allowed. No 500, no fake amounts.
+    // HARD LOCK: Only 2 emergency tiers now
     const tiers = {
-      1500: 15000,
-      3000: 30000,
-      5000: 50000,
-      7000: 70000,
-      10000: 100000,
-      15000: 150000
+      1500: 15000, // 1500 Naira = 15,000 freeCredits
+      7000: 70000 // 7000 Naira = 70,000 freeCredits
     };
 
     const points = tiers[tierAmount];
-    if (!points) return res.status(400).json({ error: 'Invalid tier amount' });
+    if (!points) return res.status(400).json({ error: 'Invalid tier amount. Only 1500 or 7000 allowed' });
 
     const token = crypto.randomBytes(16).toString('hex');
     const db = getDbShard(userId);
 
-    // Lock it in DB. This is the proof. No credit yet.
     await db.client.deposit.create({
       data: {
         id: crypto.randomBytes(8).toString('hex'),
@@ -859,12 +853,13 @@ app.post('/api/deposit/init', authenticateToken, async (req, res) => {
         points,
         token,
         status: 'PENDING',
-        expiresAt: new Date(Date.now() + 30 * 60 * 1000) // 30min to pay
+        meta: 'DEPOSIT', // important for /payment/verify
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000)
       }
     });
 
     res.json({
-      selarLink: `https://selar.co/m/YOUR_STORE_SLUG/${tierAmount}`, // <- CHANGE YOUR_STORE_SLUG
+      selarLink: `https://selar.co/m/YOUR_STORE_SLUG/${tierAmount}`,
       token
     });
   } catch (err) {
