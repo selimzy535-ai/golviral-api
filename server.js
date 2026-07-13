@@ -892,11 +892,11 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
     if (!tx_ref ||!token) return res.status(400).json({ error: 'Missing tx_ref or token' });
 
     const db = getDbShard(userId);
-    const deposit = await db.client.deposit.findFirst({ where: { userId, token, status: 'PENDING', expiresAt: { gt: new Date() } });
-    if (!deposit) return res.status(400).json({ error: 'Invalid or expired ticket' });
+const deposit = await db.client.deposit.findFirst({ where: { userId, token, status: 'PENDING', expiresAt: { gt: new Date() } });
+if (!deposit) return res.status(400).json({ error: 'Invalid or expired ticket' });
 
-    const usedTx = await db.client.deposit.findFirst({ where: { reference: tx_ref, status: 'SUCCESS' } });
-    if (usedTx) return res.status(400).json({ error: 'Payment already redeemed' });
+const usedTx = await db.client.deposit.findFirst({ where: { reference: tx_ref, status: 'SUCCESS' } });
+if (usedTx) return res.status(400).json({ error: 'Payment already redeemed' });
 
     const ops = [ db.client.deposit.update({ where: { id: deposit.id }, data: { reference: tx_ref, status: 'SUCCESS' } }) ];
     let resp = { success: true };
