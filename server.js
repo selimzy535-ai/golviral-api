@@ -901,64 +901,6 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
   await db.client.$transaction(ops); res.json({ success: true });
 });
 
-// 2. VERIFY: Only credit if token is valid + tx_ref is new
-app.post('/api/deposit/verify', authenticateToken, async (req, res) => {
-  try {
-    const { userId } = req.user;
-    const { tx_ref, token, passToken } = req.body; // tx_ref comes from Selar redirect URL
-
-    if (!(await internalVerifyPassToken(passToken))) {
-      return res.status(400).json({ error: 'Math verification failed' });
-    }
-    if (!tx_ref || !token) return res.status(400).json({ error: 'Missing tx_ref or token' });
-
-    const db = getDbShard(userId);
-
-    // Check 1: Token must exist, PENDING, owned by user, not expired
-    const deposit = await db.client.deposit.findFirst({
-      where: {
-        userId,
-        token,
-        status: 'PENDING',
-        expiresAt: { gt: new Date() }
-      }
-    });
-    if (!deposit) return res.status(400).json({ error: 'Invalid or expired ticket' });
-
-    // Check 2: tx_ref must not be used before = prevents double spend/replay
-    const usedTx = await db.client.deposit.findFirst({
-      where: { reference: tx_ref, status: 'SUCCESS' }
-    });
-    if (usedTx) return res.status(400).json({ error: 'Payment already redeemed' });
-
-    // All good. Credit user and burn the ticket.
-    await db.client.$transaction([
-      db.client.deposit.update({
-        where: { id: deposit.id },
-        data: { reference: tx_ref, status: 'SUCCESS' }
-      }),
-      db.client.user.update({
-        where: { id: userId },
-        data: { freeCredits: { increment: deposit.points } }
-      }),
-      db.client.pointsLedger.create({
-        data: {
-          userId,
-          amount: deposit.points,
-          type: 'FREE',
-          action: 'DEPOSIT',
-          referenceId: tx_ref
-        }
-      })
-    ]);
-
-    res.json({ success: true, credited: deposit.points });
-  } catch (err) {
-    console.error('[Deposit Verify Error]', err.message);
-    res.status(500).json({ error: 'Deposit verification failed' });
-  }
-});
-
 // 3. ADMIN: View all deposits to catch fraud
 app.get('/api/admin/deposits', requireAdmin, async (req, res) => {
   const all = [];
@@ -1455,8 +1397,6 @@ app.post('/api/gift/send', authenticateToken, async (req,res)=>{
   ])
   res.json({success:true, pointsSent:gift.pointsPerGift})
 })
-
-
 
 // ========== HEALTH CHECK UP ==========
 app.get('/', (req, res) => {
