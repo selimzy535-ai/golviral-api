@@ -1335,16 +1335,15 @@ cron.schedule('*/10 * * * * *', async () => {
 });
 
 const GIFT_PACKS = {
-  RUBY: { ngn: 5000, usd: 5, points: 200 },
-  GOLD: { ngn: 10000, usd: 10, points: 500 },
-  DIAMOND: { ngn: 15000, usd: 15, points: 1000 }
+  RUBY: { ngn: 5000, points: 200, giftsTotal: 100 },
+  GOLD: { ngn: 10000, points: 500, giftsTotal: 100 },
+  DIAMOND: { ngn: 15000, points: 1000, giftsTotal: 100 }
 };
 
-// DM GUARD MIDDLEWARE
 async function requireDMUnlock(req,res,next){
-  const userId = req.userId; // FIX 1
-  const db = getDbShard(userId); // FIX 2: was missing
-  const u = await db.client.user.findUnique({where:{id:userId}}); // FIX 3
+  const userId = req.user.userId; // FIXED
+  const db = getDbShard(userId);
+  const u = await db.client.user.findUnique({where:{id:userId}});
   if(!u?.dmUnlocked) return res.status(403).json({error:"Unlock DM for 3000"});
   next();
 }
