@@ -19,7 +19,82 @@ const path = require('path');
 
 // ========== INIT & SECURITY OVERRIDES ==========
 const app = express();
+const http = require('http');
+const { Server } = require('socket.io');
+const server = http.createServer(app);
 
+const io = new Server(server, {
+  cors: {
+    origin: ['https://selimzy535-ai.github.io', 'https://golviral.com'],
+    credentials: true
+  }
+});
+
+// Map userId to socketId for DM routing
+const onlineUsers = new Map();
+
+io.use(async (socket, next) => {
+  // Auth: verify JWT from handshake
+  const token = socket.handshake.auth.token;
+  if (!token) return next(new Error("Unauthorized"));
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    socket.userId = decoded.userId;
+    next();
+  } catch (e) {
+    next(new Error("Invalid token"));
+  }
+});
+
+io.on('connection', (socket) => {
+  console.log(`[WS] User connected: ${socket.userId}`);
+  onlineUsers.set(socket.userId, socket.id);
+
+  // JOIN ROOM: user joins their own room to receive DMs
+  socket.join(socket.userId);
+
+  // 1. SEND MESSAGE REALTIME
+  socket.on('send_message', async ({ receiverId, text }) => {
+    const db = getDbShard(receiverId);
+    const senderDb = getDbShard(socket.userId);
+
+    // Check DM unlock for both users
+    const sender = await senderDb.client.user.findUnique({where:{id:socket.userId}});
+    const receiver = await db.client.user.findUnique({where:{id:receiverId}});
+    if(!sender.dmUnlocked || !receiver.dmUnlocked){
+      return socket.emit('error_msg', {error: "Both users must unlock DM for 3000"});
+    }
+
+    // Save to DB
+    const msg = await db.client.message.create({
+      data: {
+        id: crypto.randomBytes(8).toString('hex'),
+        senderId: socket.userId,
+        receiverId,
+        text
+      }
+    });
+
+    // Emit to receiver if online
+    const receiverSocketId = onlineUsers.get(receiverId);
+    if(receiverSocketId){
+      io.to(receiverId).emit('receive_message', msg);
+    }
+    
+    // Emit back to sender for UI update
+    socket.emit('receive_message', msg);
+  });
+
+  // 2. TYPING INDICATOR
+  socket.on('typing', ({receiverId}) => {
+    io.to(receiverId).emit('user_typing', {from: socket.userId});
+  });
+
+  socket.on('disconnect', () => {
+    onlineUsers.delete(socket.userId);
+    console.log(`[WS] User disconnected: ${socket.userId}`);
+  });
+});
 // Body parser - 50MB for video uploads
 app.use(express.json({ limit: '50mb' }));
 
@@ -304,7 +379,7 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
   if (!userId) return;
   const redis = getRedisShard(userId);
   const db = getDbShard(userId);
-  
+
   let lockAcquired = false;
   try {
     const lock = await redis.set(`lock:${userId}`, '1', 'EX', 3, 'NX').catch(() => 'DYNAMIC_PASS');
@@ -314,16 +389,17 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
     const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
     if (!user) return;
 
-    const walletType = user.monetizeFlag ? 'CASH' : 'FREE';
+    const walletType = user.monetizeFlag? 'CASH' : 'FREE';
     let pointsToAdd = 0;
 
     switch (action) {
-      case 'LIKE': pointsToAdd = isCreator ? 5 : 1; break;
-      case 'COMMENT': pointsToAdd = isCreator ? 10 : 3; break;
-      case 'VIEW_REEL': pointsToAdd = isCreator ? 0.5 : 0; break;
+      case 'LIKE': pointsToAdd = isCreator? 5 : 1; break;
+      case 'COMMENT': pointsToAdd = isCreator? 10 : 3; break;
+      case 'VIEW_REEL': pointsToAdd = isCreator? 0.05 : 0; break; // CHANGED FROM 0.5
       case 'READ_NOVEL': pointsToAdd = 10; break;
       case 'READ_STORY': pointsToAdd = 10; break;
       case 'REFERRAL_BONUS': pointsToAdd = 1000; break;
+      case 'GIFT': pointsToAdd = meta.points || 0; break; // NEW
     }
     if (pointsToAdd === 0) return;
 
@@ -352,8 +428,8 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
       db.client.user.update({
         where: { id: userId },
         data: {
-          freeCredits: walletType === 'FREE' ? { increment: pointsToAdd } : undefined,
-          cashBalance: walletType === 'CASH' ? { increment: pointsToAdd } : undefined,
+          freeCredits: walletType === 'FREE'? { increment: pointsToAdd } : undefined,
+          cashBalance: walletType === 'CASH'? { increment: pointsToAdd } : undefined,
         }
       })
     ]);
@@ -906,6 +982,10 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
     const refs = await db.client.referral.count({ where: { referrerId: userId, status: 'QUALIFIED' } }).catch(() => 0);
     const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000) || 0;
 
+    let followers = 0;
+    const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+    for (const shard of dbs) followers += await shard.follow.count({ where: { followingId: userId } }).catch(() => 0);
+
     res.json({
       freeCredits: user.freeCredits,
       cashBalance: user.cashBalance,
@@ -913,7 +993,9 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
       dailyCapProgress: `${todayEarned}/10000`,
       daysToMonetize: Math.max(0, 7 - days),
       refsLeft: Math.max(0, 5 - refs),
-      monetized: user.monetizeFlag
+      monetized: user.monetizeFlag,
+      followersProgress: `${followers}/10`, // NEW
+      daysProgress: `${days}/7` // NEW
     });
   } catch (err) {
     res.status(200).json({ freeCredits: 0, cashBalance: 0, todayEarnings: 0, degradedModeActive: true });
@@ -1218,22 +1300,35 @@ cron.schedule('*/10 * * * * *', async () => {
   }
 });
 
+const GIFT_PACKS = {
+  RUBY: { ngn: 5000, usd: 5, points: 200 },
+  GOLD: { ngn: 10000, usd: 10, points: 500 },
+  DIAMOND: { ngn: 15000, usd: 15, points: 1000 }
+};
+
+// DM GUARD MIDDLEWARE
+async function requireDMUnlock(req,res,next){
+  const db = getDbShard(req.userId);
+  const u = await db.client.user.findUnique({where:{id:req.userId}});
+  if(!u.dmUnlocked) return res.status(403).json({error:"Unlock DM for 3000"});
+  next();
+}
+
 cron.schedule('0 0 * * *', async () => {
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
   for (const db of targets) {
     try {
       const users = await db.user.findMany({ where: { monetizeFlag: false } });
       for (const user of users) {
-        const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000) || 0;
-        const refs = await db.referral.count({ where: { referrerId: user.id, status: 'QUALIFIED' } }).catch(() => 0);
-        if (days >= 7 && refs >= 5) {
+        const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000);
+        let followers = 0;
+        for(const shard of targets) followers += await shard.follow.count({ where: { followingId: user.id } }).catch(()=>0);
+        if (days >= 7 && followers >= 10) { // CHANGED: was refs >=5
           await db.user.update({ where: { id: user.id }, data: { monetizeFlag: true, freeFarmingStopped: true } });
-          await sendEmail(user.email, 'Monetization Activated!', '🎉 Account upgraded to cash structures.');
+          await sendEmail(user.email, 'Monetization Activated!', `You hit 7 days + 10 followers. Earnings now go to Cash.`);
         }
       }
-    } catch (err) {
-      console.error('[Midnight Cron Error]', err.message);
-    }
+    } catch (err) { console.error('[Midnight Cron Error]', err.message); }
   }
 });
 
@@ -1296,12 +1391,98 @@ cron.schedule('*/5 * * * *', async () => {
   }
 });
 
+// ========== V4.6.2 NEW ROUTES ==========
+
+// 2. DM + VERIFIED PURCHASE
+app.post('/api/dm/buy', authenticateToken, async (req,res)=>{
+  const {userId} = req.user;
+  const {currency} = req.body; // "NGN" or "USD"
+  const price = currency === "NGN"? 3000 : 3;
+  const db = getDbShard(userId);
+  // TODO: Add Paystack/Selar payment verification here
+  await db.client.user.update({where:{id:userId}, data:{isVerified:true, dmUnlocked:true}});
+  res.json({success:true, message:"DM Unlocked + Verified"})
+})
+
+app.post('/api/message/send', authenticateToken, requireDMUnlock, async (req,res)=>{
+  const {receiverId, text} = req.body;
+  const senderId = req.user.userId;
+  const db = getDbShard(receiverId);
+  await db.client.message.create({data:{id:crypto.randomBytes(8).toString('hex'), senderId, receiverId, text}});
+  res.json({sent:true})
+})
+
+app.get('/api/messages/:userId', authenticateToken, async (req,res)=>{
+  const me = req.userId;
+  const other = req.params.userId;
+  const db = getDbShard(me);
+  const msgs = await db.client.message.findMany({
+    where:{ OR:[{senderId:me, receiverId:other},{senderId:other, receiverId:me}] },
+    orderBy:{createdAt:'asc'}, take:100
+  });
+  res.json(msgs)
+})
+
+// 3. GIFT SYSTEM
+app.post('/api/gift/buy', authenticateToken, async (req,res)=>{
+  const {userId} = req.user;
+  const {giftType, currency} = req.body; // RUBY/GOLD/DIAMOND
+  const pack = GIFT_PACKS[giftType];
+  if(!pack) return res.status(400).json({error:"Invalid gift"});
+  const price = currency === "NGN"? pack.ngn : pack.usd;
+  const db = getDbShard(userId);
+  // TODO: Payment gateway here
+  await db.client.gift.create({
+    data:{
+      id: crypto.randomBytes(8).toString('hex'),
+      buyerId: userId, giftType, price,
+      pointsPerGift: pack.points,
+      expiresAt: new Date(Date.now() + 30*24*60*60*1000)
+    }
+  })
+  res.json({success:true})
+})
+
+app.post('/api/gift/send', authenticateToken, async (req,res)=>{
+  const {receiverId} = req.body;
+  const senderId = req.userId;
+  const db = getDbShard(senderId);
+
+  const gift = await db.client.gift.findFirst({where:{buyerId:senderId, expiresAt:{gt:new Date()}, giftsSent:{lt:100}}});
+  if(!gift) return res.status(400).json({error:"No active gift pack"});
+
+  await db.client.$transaction([
+    db.client.gift.update({where:{id:gift.id}, data:{giftsSent:{increment:1}}}),
+    processWalletTransaction({userId:receiverId, action:'GIFT', isCreator:true, meta:{points:gift.pointsPerGift, refId:gift.id}})
+  ])
+  res.json({success:true, pointsSent:gift.pointsPerGift})
+})
+
+// UPDATE USER PROFILE TO RETURN VERIFIED STATUS
+app.get('/api/user/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id: targetId } = req.params;
+    const meId = req.user.userId;
+    const db = getDbShard(targetId);
+    const user = await db.client.user.findUnique({
+      where: { id: targetId },
+      select: { id: true, username: true, createdAt: true, isVerified: true, dmUnlocked: true } // ADDED 2 FIELDS
+    });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    //... rest of your existing code
+    res.json({
+      userId: targetId, username: user.username, isVerified: user.isVerified, dmUnlocked: user.dmUnlocked, // ADDED
+      //...rest
+    });
+  } catch (err) { res.status(500).json({ error: 'Failed to load profile' }); }
+});
+
 // ========== HEALTH CHECK UP ==========
 app.get('/', (req, res) => {
   res.status(200).json({ status: "online", core: "GolViral Hardened Engine Infrastructure Matrix", version: "4.5" });
 });
 
 // ========== START PORT BOOTSTRAP ==========
-app.listen(PORT, () => {
-  console.log(`[SYSTEM BOOT SUCCESSFUL] Listening on network interface port: ${PORT}`);
+server.listen(PORT, () => { // CHANGED FROM app.listen
+  console.log(`[SYSTEM BOOT SUCCESSFUL] WS + HTTP Listening on port: ${PORT}`);
 });
