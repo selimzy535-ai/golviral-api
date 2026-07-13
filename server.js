@@ -17,6 +17,13 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
+// ========== ENV CONFIG ==========
+const PORT = process.env.PORT || 10000;
+const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
+const APP_BASE_URL = process.env.APPBASEURL || 'https://selimzy535-ai.github.io/golviral-frontend';
+
+console.log(`[INIT] GolViral v4.5 Hardened Core Stack Engine...`);
+console.log(`[CONFIG] APP_BASE_URL: ${APP_BASE_URL}`);
 // ========== INIT & SECURITY OVERRIDES ==========
 const app = express();
 const http = require('http');
@@ -119,14 +126,6 @@ app.use(cors({
 
 app.use(helmet());
 app.use(morgan('combined'));
-
-// ========== ENV CONFIG ==========
-const PORT = process.env.PORT || 10000;
-const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
-const APP_BASE_URL = process.env.APPBASEURL || 'https://selimzy535-ai.github.io/golviral-frontend';
-
-console.log(`[INIT] GolViral v4.5 Hardened Core Stack Engine...`);
-console.log(`[CONFIG] APP_BASE_URL: ${APP_BASE_URL}`);
 
 // ========== 3x SHARDING PRISMA CLIENTS ==========
 const dbUrls = [
@@ -874,6 +873,39 @@ app.post('/api/deposit/init', authenticateToken, async (req, res) => {
   }
 });
 
+app.post('/api/dm/init', authenticateToken, async (req, res) => {
+  const { userId } = req.user; const token = crypto.randomBytes(16).toString('hex');
+  const db = getDbShard(userId);
+  await db.client.deposit.create({ data: { id: crypto.randomBytes(8).toString('hex'), userId, amountNaira: 3000, points: 0, token, status: 'PENDING', meta: 'DM_UNLOCK', expiresAt: new Date(Date.now() + 30 * 60 * 1000) } });
+  res.json({ selarLink: `https://selar.co/m/YOUR_STORE_SLUG/3000`, token });
+});
+
+app.post('/api/gift/init', authenticateToken, async (req, res) => {
+  const { userId } = req.user; const { giftType } = req.body;
+  const pack = { RUBY: {ngn:5000,points:200,giftsTotal:100}, GOLD:{ngn:10000,points:500,giftsTotal:100}, DIAMOND:{ngn:15000,points:1000,giftsTotal:100} }[giftType];
+  if(!pack) return res.status(400).json({error:"Invalid gift"});
+  const token = crypto.randomBytes(16).toString('hex'); const db = getDbShard(userId);
+  await db.client.deposit.create({ data: { id: crypto.randomBytes(8).toString('hex'), userId, amountNaira: pack.ngn, points: pack.points, token, status: 'PENDING', meta: `GIFT_${giftType}`, expiresAt: new Date(Date.now() + 30 * 60 * 1000) } });
+  res.json({ selarLink: `https://selar.co/m/YOUR_STORE_SLUG/${pack.ngn}`, token });
+});
+
+app.post('/api/payment/verify', authenticateToken, async (req, res) => {
+  const { userId } = req.user; const { tx_ref, token, passToken } = req.body;
+  if (!(await internalVerifyPassToken(passToken))) return res.status(400).json({ error: 'Math verification failed' });
+  const db = getDbShard(userId);
+  const deposit = await db.client.deposit.findFirst({ where: { userId, token, status: 'PENDING', expiresAt: { gt: new Date() } } });
+  if (!deposit) return res.status(400).json({ error: 'Invalid or expired ticket' });
+  const usedTx = await db.client.deposit.findFirst({ where: { reference: tx_ref, status: 'SUCCESS' } });
+  if (usedTx) return res.status(400).json({ error: 'Payment already redeemed' });
+  const ops = [ db.client.deposit.update({ where: { id: deposit.id }, data: { reference: tx_ref, status: 'SUCCESS' } }) ];
+  if(deposit.meta === "DM_UNLOCK"){ ops.push(db.client.user.update({ where: { id: userId }, data: { isVerified: true, dmUnlocked: true } })) }
+  else if(deposit.meta?.startsWith("GIFT_")){
+    const giftType = deposit.meta.split('_')[1]; const pack = {points:deposit.points,giftsTotal:100};
+    ops.push(db.client.gift.create({ data:{ id: crypto.randomBytes(8).toString('hex'), buyerId: userId, giftType, price: deposit.amountNaira, pointsPerGift: pack.points, giftsSent: 0, giftsTotal: pack.giftsTotal, expiresAt: new Date(Date.now() + 30*24*60*60*1000) } }))
+  } else{ ops.push(db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: deposit.points } } })) }
+  await db.client.$transaction(ops); res.json({ success: true });
+});
+
 // 2. VERIFY: Only credit if token is valid + tx_ref is new
 app.post('/api/deposit/verify', authenticateToken, async (req, res) => {
   try {
@@ -1310,9 +1342,10 @@ const GIFT_PACKS = {
 
 // DM GUARD MIDDLEWARE
 async function requireDMUnlock(req,res,next){
-  const userId = req.user.userId; 
-  const u = await db.client.user.findUnique({where:{id:req.userId}});
-  if(!u.dmUnlocked) return res.status(403).json({error:"Unlock DM for 3000"});
+  const userId = req.userId; // FIX 1
+  const db = getDbShard(userId); // FIX 2: was missing
+  const u = await db.client.user.findUnique({where:{id:userId}}); // FIX 3
+  if(!u?.dmUnlocked) return res.status(403).json({error:"Unlock DM for 3000"});
   next();
 }
 
@@ -1395,17 +1428,6 @@ cron.schedule('*/5 * * * *', async () => {
 
 // ========== V4.6.2 NEW ROUTES ==========
 
-// 2. DM + VERIFIED PURCHASE
-app.post('/api/dm/buy', authenticateToken, async (req,res)=>{
-  const {userId} = req.user;
-  const {currency} = req.body; // "NGN" or "USD"
-  const price = currency === "NGN"? 3000 : 3;
-  const db = getDbShard(userId);
-  // TODO: Add Paystack/Selar payment verification here
-  await db.client.user.update({where:{id:userId}, data:{isVerified:true, dmUnlocked:true}});
-  res.json({success:true, message:"DM Unlocked + Verified"})
-})
-
 app.post('/api/message/send', authenticateToken, requireDMUnlock, async (req,res)=>{
   const {receiverId, text} = req.body;
   const senderId = req.user.userId;
@@ -1425,29 +1447,9 @@ app.get('/api/messages/:userId', authenticateToken, async (req,res)=>{
   res.json(msgs)
 })
 
-// 3. GIFT SYSTEM
-app.post('/api/gift/buy', authenticateToken, async (req,res)=>{
-  const {userId} = req.user;
-  const {giftType, currency} = req.body; // RUBY/GOLD/DIAMOND
-  const pack = GIFT_PACKS[giftType];
-  if(!pack) return res.status(400).json({error:"Invalid gift"});
-  const price = currency === "NGN"? pack.ngn : pack.usd;
-  const db = getDbShard(userId);
-  // TODO: Payment gateway here
-  await db.client.gift.create({
-    data:{
-      id: crypto.randomBytes(8).toString('hex'),
-      buyerId: userId, giftType, price,
-      pointsPerGift: pack.points,
-      expiresAt: new Date(Date.now() + 30*24*60*60*1000)
-    }
-  })
-  res.json({success:true})
-})
-
 app.post('/api/gift/send', authenticateToken, async (req,res)=>{
   const {receiverId} = req.body;
-  const senderId = req.userId;
+  const senderId = req.user.userId;
   const db = getDbShard(senderId);
 
   const gift = await db.client.gift.findFirst({where:{buyerId:senderId, expiresAt:{gt:new Date()}, giftsSent:{lt:100}}});
