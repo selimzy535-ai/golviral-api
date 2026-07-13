@@ -1002,15 +1002,22 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
   }
 });
 
+// UPDATE USER PROFILE TO RETURN VERIFIED STATUS
 app.get('/api/user/:id', authenticateToken, async (req, res) => {
   try {
     const { id: targetId } = req.params;
-    const meId = req.userId;
+    const meId = req.user.userId; // FIXED
     const db = getDbShard(targetId);
 
     const user = await db.client.user.findUnique({
       where: { id: targetId },
-      select: { id: true, username: true, createdAt: true }
+      select: { 
+        id: true, 
+        username: true, 
+        createdAt: true, 
+        isVerified: true,  // FROM ROUTE 2
+        dmUnlocked: true   // FROM ROUTE 2
+      }
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
@@ -1019,24 +1026,17 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
       select: { id: true, views: true, likes: true }
     });
 
-    let followers = 0, following = 0;
+    let followers = 0, following = 0, isFollowing = false;
     const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
 
     for (const shard of dbs) {
-      const f1 = await shard.follow.count({ where: { followingId: targetId } }).catch(() => 0);
-      const f2 = await shard.follow.count({ where: { followerId: targetId } }).catch(() => 0);
-      followers += f1;
-      following += f2;
-    }
-
-    // ===== NEW: Check if ME follows TARGET =====
-    let isFollowing = false;
-    if(meId !== targetId){
-      for (const shard of dbs) {
+      followers += await shard.follow.count({ where: { followingId: targetId } }).catch(() => 0);
+      following += await shard.follow.count({ where: { followerId: targetId } }).catch(() => 0);
+      if(!isFollowing && meId !== targetId){
         const rel = await shard.follow.findFirst({ 
           where: { followerId: meId, followingId: targetId } 
         }).catch(() => null);
-        if(rel) { isFollowing = true; break; }
+        if(rel) { isFollowing = true; }
       }
     }
 
@@ -1046,12 +1046,14 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
     res.json({
       userId: targetId,
       username: user.username,
-      totalViews,
-      totalLikes,
-      totalPosts: posts.length,
-      followers,
-      following,
-      isFollowing, // <-- NEW FLAG FOR FRONTEND
+      isVerified: user.isVerified,     // FROM ROUTE 2
+      dmUnlocked: user.dmUnlocked,     // FROM ROUTE 2
+      totalViews,                      // FROM ROUTE 1
+      totalLikes,                      // FROM ROUTE 1
+      totalPosts: posts.length,        // FROM ROUTE 1
+      followers,                       // FROM ROUTE 1
+      following,                       // FROM ROUTE 1
+      isFollowing,                     // FROM ROUTE 1
       profileLink: `${APP_BASE_URL}/u/${targetId}`,
       referralLink: `${APP_BASE_URL}/auth.html?ref=${targetId}`
     });
@@ -1308,7 +1310,7 @@ const GIFT_PACKS = {
 
 // DM GUARD MIDDLEWARE
 async function requireDMUnlock(req,res,next){
-  const db = getDbShard(req.userId);
+  const userId = req.user.userId; 
   const u = await db.client.user.findUnique({where:{id:req.userId}});
   if(!u.dmUnlocked) return res.status(403).json({error:"Unlock DM for 3000"});
   next();
@@ -1413,7 +1415,7 @@ app.post('/api/message/send', authenticateToken, requireDMUnlock, async (req,res
 })
 
 app.get('/api/messages/:userId', authenticateToken, async (req,res)=>{
-  const me = req.userId;
+  const me = req.user.userId; 
   const other = req.params.userId;
   const db = getDbShard(me);
   const msgs = await db.client.message.findMany({
@@ -1458,24 +1460,7 @@ app.post('/api/gift/send', authenticateToken, async (req,res)=>{
   res.json({success:true, pointsSent:gift.pointsPerGift})
 })
 
-// UPDATE USER PROFILE TO RETURN VERIFIED STATUS
-app.get('/api/user/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id: targetId } = req.params;
-    const meId = req.user.userId;
-    const db = getDbShard(targetId);
-    const user = await db.client.user.findUnique({
-      where: { id: targetId },
-      select: { id: true, username: true, createdAt: true, isVerified: true, dmUnlocked: true } // ADDED 2 FIELDS
-    });
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    //... rest of your existing code
-    res.json({
-      userId: targetId, username: user.username, isVerified: user.isVerified, dmUnlocked: user.dmUnlocked, // ADDED
-      //...rest
-    });
-  } catch (err) { res.status(500).json({ error: 'Failed to load profile' }); }
-});
+
 
 // ========== HEALTH CHECK UP ==========
 app.get('/', (req, res) => {
