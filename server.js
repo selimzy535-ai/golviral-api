@@ -885,22 +885,48 @@ app.post('/api/gift/init', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/payment/verify', authenticateToken, async (req, res) => {
-  const { userId } = req.user; const { tx_ref, token, passToken } = req.body;
-  if (!(await internalVerifyPassToken(passToken))) return res.status(400).json({ error: 'Math verification failed' });
-  const db = getDbShard(userId);
-  const deposit = await db.client.deposit.findFirst({ where: { userId, token, status: 'PENDING', expiresAt: { gt: new Date() } } });
-  if (!deposit) return res.status(400).json({ error: 'Invalid or expired ticket' });
-  const usedTx = await db.client.deposit.findFirst({ where: { reference: tx_ref, status: 'SUCCESS' } });
-  if (usedTx) return res.status(400).json({ error: 'Payment already redeemed' });
-  const ops = [ db.client.deposit.update({ where: { id: deposit.id }, data: { reference: tx_ref, status: 'SUCCESS' } }) ];
-  if(deposit.meta === "DM_UNLOCK"){ ops.push(db.client.user.update({ where: { id: userId }, data: { isVerified: true, dmUnlocked: true } })) }
-  else if(deposit.meta?.startsWith("GIFT_")){
-    const giftType = deposit.meta.split('_')[1]; const pack = {points:deposit.points,giftsTotal:100};
-    ops.push(db.client.gift.create({ data:{ id: crypto.randomBytes(8).toString('hex'), buyerId: userId, giftType, price: deposit.amountNaira, pointsPerGift: pack.points, giftsSent: 0, giftsTotal: pack.giftsTotal, expiresAt: new Date(Date.now() + 30*24*60*60*1000) } }))
-  } else{ ops.push(db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: deposit.points } } })) }
-  await db.client.$transaction(ops); res.json({ success: true });
-});
+  try {
+    const { userId } = req.user;
+    const { tx_ref, token, passToken } = req.body;
+    if (!(await internalVerifyPassToken(passToken))) return res.status(400).json({ error: 'Math verification failed' });
+    if (!tx_ref ||!token) return res.status(400).json({ error: 'Missing tx_ref or token' });
 
+    const db = getDbShard(userId);
+    const deposit = await db.client.deposit.findFirst({ where: { userId, token, status: 'PENDING', expiresAt: { gt: new Date() } });
+    if (!deposit) return res.status(400).json({ error: 'Invalid or expired ticket' });
+
+    const usedTx = await db.client.deposit.findFirst({ where: { reference: tx_ref, status: 'SUCCESS' } });
+    if (usedTx) return res.status(400).json({ error: 'Payment already redeemed' });
+
+    const ops = [ db.client.deposit.update({ where: { id: deposit.id }, data: { reference: tx_ref, status: 'SUCCESS' } }) ];
+    let resp = { success: true };
+
+    if (deposit.meta === "DM_UNLOCK") {
+      ops.push(db.client.user.update({ where: { id: userId }, data: { isVerified: true, dmUnlocked: true } }));
+      resp.unlocked = "DM";
+    }
+    else if (deposit.meta?.startsWith("GIFT_")) {
+      const giftType = deposit.meta.split('_')[1];
+      const pack = GIFT_PACKS[giftType];
+      if(!pack) return res.status(400).json({error:"Invalid gift"});
+      ops.push(db.client.gift.create({ data:{ id: crypto.randomBytes(8).toString('hex'), buyerId: userId, giftType, price: deposit.amountNaira, pointsPerGift: pack.points, giftsSent: 0, giftsTotal: pack.giftsTotal, expiresAt: new Date(Date.now() + 30*24*60*60*1000) } }));
+      resp.gift = giftType;
+    }
+    else {
+      ops.push(
+        db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: deposit.points } } }),
+        db.client.pointsLedger.create({ data: { userId, amount: deposit.points, type: 'FREE', action: 'DEPOSIT', referenceId: tx_ref } })
+      );
+      resp.credited = deposit.points;
+    }
+
+    await db.client.$transaction(ops);
+    res.json(resp);
+  } catch (err) {
+    console.error('[Payment Verify Error]', err.message);
+    res.status(500).json({ error: 'Payment verification failed' });
+  }
+});
 // 3. ADMIN: View all deposits to catch fraud
 app.get('/api/admin/deposits', requireAdmin, async (req, res) => {
   const all = [];
