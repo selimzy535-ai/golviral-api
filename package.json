@@ -15,7 +15,8 @@
     "redis",
     "aws-sdk",
     "backblaze",
-    "fail-safe"
+    "fail-safe",
+    "socket.io"
   ],
   "author": "GolViral Core Team",
   "license": "ISC",
@@ -32,7 +33,8 @@
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
     "node-cron": "^3.0.3",
-    "nodemailer": "^6.9.14"
+    "nodemailer": "^6.9.14",
+    "socket.io": "^4.7.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.4",
