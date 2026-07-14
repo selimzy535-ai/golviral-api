@@ -825,7 +825,11 @@ app.get('/api/post/:id', async (req, res) => {
     res.status(500).json({ error: 'Post load failed' });
   }
 });
-
+const GIFT_PACKS = {
+  RUBY: { ngn: 5000, points: 200, giftsTotal: 100 },
+  GOLD: { ngn: 10000, points: 500, giftsTotal: 100 },
+  DIAMOND: { ngn: 15000, points: 1000, giftsTotal: 100 }
+};
 // ========== PAYMENT & WALLET SYSTEMS ==========
 
 app.post('/api/deposit/init', authenticateToken, async (req, res) => {
@@ -894,8 +898,8 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
     const db = getDbShard(userId);
 
     const deposit = await db.client.deposit.findFirst({
-      where: { userId, token, status: 'PENDING', expiresAt: { gt: new Date() }
-    }); // <- ADDED ) HERE
+      where: { userId, token, status: 'PENDING', expiresAt: { gt: new Date() } }
+    });
 
     if (!deposit) return res.status(400).json({ error: 'Invalid or expired ticket' });
 
@@ -915,7 +919,7 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
       const giftType = deposit.meta.split('_')[1];
       const pack = GIFT_PACKS[giftType];
       if(!pack) return res.status(400).json({error:"Invalid gift"});
-      ops.push(db.client.gift.create({ data:{ id: crypto.randomBytes(8).toString('hex'), buyerId: userId, giftType, price: deposit.amountNaira, pointsPerGift: pack.points, giftsSent: 0, giftsTotal: pack.giftsTotal, expiresAt: new Date(Date.now() + 30*24*60*60*1000) }));
+      ops.push(db.client.gift.create({ data:{ id: crypto.randomBytes(8).toString('hex'), buyerId: userId, giftType, price: deposit.amountNaira, pointsPerGift: pack.points, giftsSent: 0, giftsTotal: pack.giftsTotal, expiresAt: new Date(Date.now() + 30*24*60*60*1000) } }));
       resp.gift = giftType;
     } else {
       ops.push(
@@ -1301,12 +1305,6 @@ cron.schedule('*/10 * * * * *', async () => {
     interactionBuffer.unshift(...failedItems);
   }
 });
-
-const GIFT_PACKS = {
-  RUBY: { ngn: 5000, points: 200, giftsTotal: 100 },
-  GOLD: { ngn: 10000, points: 500, giftsTotal: 100 },
-  DIAMOND: { ngn: 15000, points: 1000, giftsTotal: 100 }
-};
 
 async function requireDMUnlock(req,res,next){
   const userId = req.user.userId; // FIXED
