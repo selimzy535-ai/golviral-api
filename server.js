@@ -892,6 +892,7 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
     const { tx_ref, token, passToken } = req.body;
+
     if (!(await internalVerifyPassToken(passToken))) return res.status(400).json({ error: 'Math verification failed' });
     if (!tx_ref ||!token) return res.status(400).json({ error: 'Missing tx_ref or token' });
 
@@ -923,7 +924,7 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
       resp.gift = giftType;
     } else {
       ops.push(
-        db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: deposit.points } }),
+        db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: deposit.points } } }),
         db.client.pointsLedger.create({ data: { userId, amount: deposit.points, type: 'FREE', action: 'DEPOSIT', referenceId: tx_ref } })
       );
       resp.credited = deposit.points;
