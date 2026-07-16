@@ -18,8 +18,8 @@ model User {
   cashBalance Float @default(0)
   monetizeFlag Boolean @default(false)
   freeFarmingStopped Boolean @default(false)
-  isVerified Boolean @default(false) // NEW: For DM unlock badge
-  dmUnlocked Boolean @default(false) // NEW: For DM gate
+  isVerified Boolean @default(false) // Badge for monetized users
+  dmUnlocked Boolean @default(false) // Legacy: paid DM unlock
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -29,9 +29,10 @@ model User {
   ledgers PointsLedger[]
   payouts PayoutQueue[]
   deposits Deposit[]
-  messagesSent Message[] @relation("SentMessages") // NEW
-  messagesReceived Message[] @relation("ReceivedMessages") // NEW
-  gifts Gift[] // NEW
+  messagesSent Message[] @relation("SentMessages")
+  messagesReceived Message[] @relation("ReceivedMessages")
+  gifts Gift[]
+  supportTickets SupportTicket[] // NEW V5.1
 
   // Follow relations
   followers Follow[] @relation("Followers")
@@ -54,7 +55,7 @@ model Deposit {
   token String @unique
   reference String @unique @default("")
   status String @default("PENDING")
-  meta String @default("DEPOSIT") @db.VarChar(50) // NEW: DEPOSIT, DM_UNLOCK, GIFT_RUBY
+  meta String @default("DEPOSIT") @db.VarChar(50) // DEPOSIT, DM_UNLOCK, GIFT_RUBY, BOOST_postId_3500
   createdAt DateTime @default(now())
   expiresAt DateTime
 
@@ -70,13 +71,20 @@ model Deposit {
 model Post {
   id String @id @db.VarChar(16)
   userId String @db.VarChar(16)
-  type String @default("reel") @db.VarChar(15)
+  type String @default("reel") @db.VarChar(15) // reel, novel, story, store
   title String @default("") @db.Text
   content String @default("") @db.Text
   mediaUrl String @db.Text
   thumbnailUrl String @db.Text
-  status String @db.VarChar(20)
+  status String @db.VarChar(20) // PRE_UPLOAD, ACTIVE, REJECTED
   b2Shard Int @default(0)
+
+  // V5.1 NEW FIELDS
+  caption String? @db.Text
+  externalLink String? @db.Text
+  isBoosted Boolean @default(false)
+  boostTier String? @db.VarChar(20) // "1DAY", "3DAY", "7DAY"
+  boostExpiresAt DateTime?
 
   score Float @default(0)
   likes Int @default(0)
@@ -91,6 +99,8 @@ model Post {
   @@index([status])
   @@index([type])
   @@index([score])
+  @@index([isBoosted])
+  @@index([boostExpiresAt])
   @@index([createdAt])
 }
 
@@ -112,8 +122,8 @@ model PointsLedger {
   id Int @id @default(autoincrement())
   userId String @db.VarChar(16)
   amount Float
-  type String @db.VarChar(10)
-  action String @db.VarChar(30)
+  type String @db.VarChar(10) // FREE, CASH
+  action String @db.VarChar(30) // LIKE, VIEW_REEL, DEPOSIT, GIFT
   referenceId String @db.VarChar(64)
   createdAt DateTime @default(now())
 
@@ -128,7 +138,7 @@ model Referral {
   id String @id @default(uuid())
   referrerId String @db.VarChar(16)
   refereeId String @unique @db.VarChar(16)
-  status String @db.VarChar(20)
+  status String @db.VarChar(20) // PENDING, QUALIFIED
   createdAt DateTime @default(now())
 
   referrer User @relation("Referrer", fields: [referrerId], references: [id], onDelete: Cascade)
@@ -143,9 +153,9 @@ model PayoutQueue {
   id String @id @db.VarChar(16)
   userId String @db.VarChar(16)
   amountPoints Float
-  routingTarget String @db.VarChar(50)
-  targetDetails String @db.Text
-  status String @db.VarChar(20)
+  routingTarget String @db.VarChar(50) // BANK, USDT
+  targetDetails String @db.Text // JSON for bank, TRC20 address for USDT
+  status String @db.VarChar(20) // PENDING, APPROVED, REJECTED
   reason String? @db.Text
   createdAt DateTime @default(now())
 
@@ -171,7 +181,7 @@ model Follow {
   @@index([createdAt])
 }
 
-// ========== NEW MODELS FOR V4.6 ==========
+// ========== MESSAGING ==========
 model Message {
   id String @id @db.VarChar(16)
   senderId String @db.VarChar(16)
@@ -187,6 +197,7 @@ model Message {
   @@index([createdAt])
 }
 
+// ========== GIFTS ==========
 model Gift {
   id String @id @db.VarChar(16)
   buyerId String @db.VarChar(16)
@@ -202,4 +213,22 @@ model Gift {
 
   @@index([buyerId])
   @@index([expiresAt])
+}
+
+// ========== NEW V5.1: SUPPORT TICKETS ==========
+model SupportTicket {
+  id String @id @db.VarChar(16)
+  userId String @db.VarChar(16)
+  subject String @db.VarChar(255)
+  message String @db.Text
+  reply String @default("") @db.Text
+  status String @default("PENDING") @db.VarChar(20) // PENDING, RESOLVED
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
 }
