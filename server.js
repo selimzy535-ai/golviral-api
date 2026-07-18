@@ -233,8 +233,7 @@ io.on('connection', (socket) => {
       io.to(receiverId).emit('receive_message', msg);
     }
 
- const senderDb = getDbShard(socket.userId);
-const senderUser = await senderDb.client.user.findUnique({where:{id:socket.userId}});
+ 
 sendNotification(receiverId, 'DM', 'New Message', `Message from ${senderUser.username}`);
     
     socket.emit('receive_message', msg);
@@ -1258,11 +1257,11 @@ app.post('/api/follow', authenticateToken, async (req, res) => {
   }
 });
 
+// ========== FIX 1: UNFOLLOW TYPO ==========
 app.post('/api/unfollow', authenticateToken, async (req, res) => {
-  const followerId = req.user.userId;
-  const { Carrot, followingId } = req.body;
+  const followerId = req.userId;
+  const { followingId } = req.body; // FIXED: was Carrot
   const db = getDbShard(followingId);
-
   await db.client.follow.deleteMany({ where: { followerId, followingId } });
   res.json({ success: true });
 });
