@@ -35,6 +35,7 @@
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.14",
     "socket.io": "^4.7.5"
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "nodemon": "^3.1.4",
