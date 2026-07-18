@@ -22,8 +22,9 @@ const PORT = process.env.PORT || 10000;
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
 const APP_BASE_URL = process.env.APPBASEURL || 'https://selimzy535-ai.github.io/golviral-frontend';
 
-console.log(`[INIT] GolViral v4.5 Hardened Core Stack Engine...`);
+console.log(`[INIT] GolViral v5.1 Hardened Core Stack Engine...`);
 console.log(`[CONFIG] APP_BASE_URL: ${APP_BASE_URL}`);
+
 // ========== INIT & SECURITY OVERRIDES ==========
 const app = express();
 const http = require('http');
@@ -39,93 +40,6 @@ const io = new Server(server, {
 
 // Map userId to socketId for DM routing
 const onlineUsers = new Map();
-
-io.use(async (socket, next) => {
-  // Auth: verify JWT from handshake
-  const token = socket.handshake.auth.token;
-  if (!token) return next(new Error("Unauthorized"));
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    socket.userId = decoded.userId;
-    next();
-  } catch (e) {
-    next(new Error("Invalid token"));
-  }
-});
-
-io.on('connection', (socket) => {
-  console.log(`[WS] User connected: ${socket.userId}`);
-  onlineUsers.set(socket.userId, socket.id);
-
-  // JOIN ROOM: user joins their own room to receive DMs
-  socket.join(socket.userId);
-
-  // 1. SEND MESSAGE REALTIME
-  socket.on('send_message', async ({ receiverId, text }) => {
-    const db = getDbShard(receiverId);
-    const senderDb = getDbShard(socket.userId);
-
-    // Check DM unlock for both users
-    const sender = await senderDb.client.user.findUnique({where:{id:socket.userId}});
-    const receiver = await db.client.user.findUnique({where:{id:receiverId}});
-    if(!sender.dmUnlocked || !receiver.dmUnlocked){
-      return socket.emit('error_msg', {error: "Both users must unlock DM for 3000"});
-    }
-
-    // Save to DB
-    const msg = await db.client.message.create({
-      data: {
-        id: crypto.randomBytes(8).toString('hex'),
-        senderId: socket.userId,
-        receiverId,
-        text
-      }
-    });
-
-    // Emit to receiver if online
-    const receiverSocketId = onlineUsers.get(receiverId);
-    if(receiverSocketId){
-      io.to(receiverId).emit('receive_message', msg);
-    }
-    
-    // Emit back to sender for UI update
-    socket.emit('receive_message', msg);
-  });
-
-  // 2. TYPING INDICATOR
-  socket.on('typing', ({receiverId}) => {
-    io.to(receiverId).emit('user_typing', {from: socket.userId});
-  });
-
-  socket.on('disconnect', () => {
-    onlineUsers.delete(socket.userId);
-    console.log(`[WS] User disconnected: ${socket.userId}`);
-  });
-});
-// Body parser - 50MB for video uploads
-app.use(express.json({ limit: '50mb' }));
-
-// CORS - Allow GitHub Pages + Custom Domain
-const allowedOrigins = [
-  'https://selimzy535-ai.github.io',
-  'https://golviral.com'
-];
-
-app.use(cors({ 
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('CORS blocked: ' + origin));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-app.use(helmet());
-app.use(morgan('combined'));
 
 // ========== 3x SHARDING PRISMA CLIENTS ==========
 const dbUrls = [
@@ -237,6 +151,117 @@ async function findPostAcrossShards(id) {
   }
   return null;
 }
+
+// Dynamic Monetization Check Helper
+async function isUserMonetized(userId) {
+  const db = getDbShard(userId);
+  const user = await db.client.user.findUnique({ where: { id: userId } });
+  if (!user) return false;
+  if (user.monetizeFlag) return true;
+
+  const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000);
+  let followers = 0;
+  const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+  for (const shard of dbs) {
+    followers += await shard.follow.count({ where: { followingId: userId } }).catch(() => 0);
+  }
+
+  if (days >= 7 && followers >= 10) {
+    await db.client.user.update({
+      where: { id: userId },
+      data: { monetizeFlag: true, freeFarmingStopped: true }
+    }).catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+// ========== SOCKET HANDSHAKE & EVENTS ==========
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth.token;
+  if (!token) return next(new Error("Unauthorized"));
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    socket.userId = decoded.userId;
+    next();
+  } catch (e) {
+    next(new Error("Invalid token"));
+  }
+});
+
+io.on('connection', (socket) => {
+  console.log(`[WS] User connected: ${socket.userId}`);
+  onlineUsers.set(socket.userId, socket.id);
+  socket.join(socket.userId);
+
+  // 1. SEND MESSAGE REALTIME
+  socket.on('send_message', async ({ receiverId, text }) => {
+    const db = getDbShard(receiverId);
+    const senderDb = getDbShard(socket.userId);
+
+    const sender = await senderDb.client.user.findUnique({where:{id:socket.userId}});
+    const receiver = await db.client.user.findUnique({where:{id:receiverId}});
+
+    // DM is Free only if the user (or target) is monetized, otherwise they must have paid (dmUnlocked === true)
+    const senderEligible = (await isUserMonetized(socket.userId)) || sender.dmUnlocked;
+    const receiverEligible = (await isUserMonetized(receiverId)) || receiver.dmUnlocked;
+
+    if(!senderEligible || !receiverEligible){
+      return socket.emit('error_msg', {error: "Both users must unlock DM or have monetization active (7 days + 10 followers)"});
+    }
+
+    // Save to DB
+    const msg = await db.client.message.create({
+      data: {
+        id: crypto.randomBytes(8).toString('hex'),
+        senderId: socket.userId,
+        receiverId,
+        text
+      }
+    });
+
+    const receiverSocketId = onlineUsers.get(receiverId);
+    if(receiverSocketId){
+      io.to(receiverId).emit('receive_message', msg);
+    }
+    
+    socket.emit('receive_message', msg);
+  });
+
+  socket.on('typing', ({receiverId}) => {
+    io.to(receiverId).emit('user_typing', {from: socket.userId});
+  });
+
+  socket.on('disconnect', () => {
+    onlineUsers.delete(socket.userId);
+    console.log(`[WS] User disconnected: ${socket.userId}`);
+  });
+});
+
+// Body parser - 50MB for video uploads
+app.use(express.json({ limit: '50mb' }));
+
+// CORS - Allow GitHub Pages + Custom Domain
+const allowedOrigins = [
+  'https://selimzy535-ai.github.io',
+  'https://golviral.com'
+];
+
+app.use(cors({ 
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('CORS blocked: ' + origin));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+app.use(helmet());
+app.use(morgan('combined'));
 
 // ========== GLOBAL MEMORY BUFFER ==========
 let interactionBuffer = [];
@@ -388,17 +413,18 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
     const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
     if (!user) return;
 
-    const walletType = user.monetizeFlag? 'CASH' : 'FREE';
+    const walletType = user.monetizeFlag ? 'CASH' : 'FREE';
     let pointsToAdd = 0;
 
+    // Upgraded coeffecients for V5.1
     switch (action) {
-      case 'LIKE': pointsToAdd = isCreator? 5 : 1; break;
-      case 'COMMENT': pointsToAdd = isCreator? 10 : 3; break;
-      case 'VIEW_REEL': pointsToAdd = isCreator? 0.05 : 0; break; // CHANGED FROM 0.5
+      case 'LIKE': pointsToAdd = isCreator ? 10 : 1; break;
+      case 'COMMENT': pointsToAdd = isCreator ? 15 : 3; break;
+      case 'VIEW_REEL': pointsToAdd = isCreator ? 0.2 : 0; break; 
       case 'READ_NOVEL': pointsToAdd = 10; break;
       case 'READ_STORY': pointsToAdd = 10; break;
       case 'REFERRAL_BONUS': pointsToAdd = 1000; break;
-      case 'GIFT': pointsToAdd = meta.points || 0; break; // NEW
+      case 'GIFT': pointsToAdd = meta.points || 0; break; 
     }
     if (pointsToAdd === 0) return;
 
@@ -406,7 +432,7 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
       const today = new Date().toISOString().split('T')[0];
       const capKey = `cap:${userId}:${today}`;
       const current = parseFloat(await redis.get(capKey).catch(() => '0') || '0');
-      if (current >= 10000) return;
+      if (current >= 10000) return; // Cap at 10000pts limit 
       if (current + pointsToAdd > 10000) pointsToAdd = 10000 - current;
       await redis.incrbyfloat(capKey, pointsToAdd).catch(() => {});
       await redis.expire(capKey, 90000).catch(() => {});
@@ -427,8 +453,8 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
       db.client.user.update({
         where: { id: userId },
         data: {
-          freeCredits: walletType === 'FREE'? { increment: pointsToAdd } : undefined,
-          cashBalance: walletType === 'CASH'? { increment: pointsToAdd } : undefined,
+          freeCredits: walletType === 'FREE' ? { increment: pointsToAdd } : undefined,
+          cashBalance: walletType === 'CASH' ? { increment: pointsToAdd } : undefined,
         }
       })
     ]);
@@ -560,7 +586,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 // ========== POST CREATION & PROCESSING PORTS ==========
 app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
   const { userId } = req.user;
-  const { fileExtension, contentType, postType } = req.body;
+  const { fileExtension, contentType, postType, caption, externalLink } = req.body;
 
   const db = getDbShard(userId);
   const redis = getRedisShard(userId);
@@ -572,42 +598,72 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
     if (!user) return res.status(404).json({ error: 'User mapping vanished inside infrastructure arrays' });
 
-    const fee = (postType === 'novel' || postType === 'story') ? 10 : 25;
+    const fee = (postType === 'novel' || postType === 'story' || postType === 'store') ? 10 : 25;
     if (user.freeCredits < fee) return res.status(400).json({ error: `Insufficient points: Need ${fee} credits` });
 
-    const today = new Date().toISOString().split('T')[0];
-    const postsKey = `posts:${userId}:${today}`;
-    const postsToday = parseInt(await redis.get(postsKey).catch(() => '0') || '0');
-    if (postsToday >= 3) return res.status(429).json({ error: 'Daily posting thresholds violated. Cap = 3/day.' });
+    // V5.1 Constraint - Maximum 3 posts limit per day: exactly 1 reel, 1 novel, 1 story (no duplication of same type)
+    const startOfToday = new Date();
+    startOfToday.setHours(0,0,0,0);
+    const postsToday = await db.client.post.findMany({
+      where: {
+        userId,
+        createdAt: { gte: startOfToday }
+      },
+      select: { type: true }
+    });
+
+    if (postsToday.length >= 3) {
+      return res.status(429).json({ error: 'Daily posting limit of 3 posts reached.' });
+    }
+
+    const normalizedType = (postType === 'story' || postType === 'store') ? 'story' : postType;
+    const alreadyHasType = postsToday.some(p => {
+      const existingType = (p.type === 'story' || p.type === 'store') ? 'story' : p.type;
+      return existingType === normalizedType;
+    });
+
+    if (alreadyHasType) {
+      return res.status(429).json({ error: `You have already posted a ${normalizedType} today. Only 1 reel, 1 novel, and 1 story is allowed per day.` });
+    }
 
     await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } } });
 
     const postId = crypto.randomBytes(8).toString('hex');
     const b2 = getB2Shard(userId);
 
-    // ===== FIX START: iPhone.MOV Support =====
+    // ===== iPhone.MOV Support =====
     const allowedTypes = ['video/mp4', 'video/quicktime', 'video/mov'];
     const ct = allowedTypes.includes(contentType) ? contentType : 'video/mp4';
 
-    // If frontend didn't send ext, derive it from mime
     let ext = fileExtension;
     if (!ext) {
       ext = ct === 'video/quicktime' ? 'mov' : 'mp4';
     }
     const key = `media/${postId}.${ext}`;
-    // ===== FIX END =====
 
     let presignedUrl = "";
     try {
       const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: ct });
-      presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 }); // 1hr to upload
+      presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
     } catch (s3Err) {
       console.error('[B2 Sign Fail]', s3Err.message);
       return res.status(500).json({ error: 'B2 presign failed' });
     }
 
+    // Save with caption & externalLink 
     await db.client.post.create({
-      data: { id: postId, userId, type: postType || 'reel', mediaUrl: key, thumbnailUrl: '', status: 'PRE_UPLOAD', b2Shard: getShardIndex(userId) }
+      data: { 
+        id: postId, 
+        userId, 
+        type: postType || 'reel', 
+        mediaUrl: key, 
+        thumbnailUrl: '', 
+        status: 'PRE_UPLOAD', 
+        b2Shard: getShardIndex(userId),
+        caption: caption || '',
+        externalLink: externalLink || '',
+        isBoosted: false
+      }
     });
 
     res.json({ postId, uploadUrl: presignedUrl, objectKey: key });
@@ -629,7 +685,7 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
   const post = await db.client.post.findUnique({ where: { id: postId } }).catch(() => null);
   if (!post) return res.status(404).json({ error: 'Target tracking missing' });
 
-  if (post.type === 'novel' || post.type === 'story') {
+  if (post.type === 'novel' || post.type === 'story' || post.type === 'store') {
     await db.client.post.update({
       where: { id: postId },
       data: { status: 'ACTIVE', title: title || '', content: content || '' }
@@ -709,7 +765,7 @@ app.post('/api/like', authenticateToken, (req, res) => {
 app.post('/api/comment', authenticateToken, async (req, res) => {
   try {
     const { postId, creatorId, text } = req.body;
-    const actorId = req.user.userId; // FIX: Access from nested req.user setup
+    const actorId = req.user.userId; 
     if (!postId || !creatorId || !text || text.trim().length < 2) {
       return res.status(400).json({ error: 'Invalid comment payload' });
     }
@@ -756,7 +812,7 @@ app.get('/api/comments/:postId', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to load comments' });
   }
-});      
+});       
 
 app.post('/api/read-session', authenticateToken, (req, res) => {
   const { contentId, authorId, contentType } = req.body;
@@ -786,18 +842,39 @@ app.get('/api/feed', async (req, res) => {
           comments: true,
           views: true,
           score: true,
-          createdAt: true
+          createdAt: true,
+          isBoosted: true,
+          boostExpiresAt: true,
+          externalLink: true,
+          caption: true
         },
-        orderBy: { score: 'desc' },
-        take: 12
+        take: 24
       });
-      feed.push(...posts);
+      
+      const processedPosts = posts.map(p => {
+        const currentlyBoosted = p.isBoosted && p.boostExpiresAt && new Date(p.boostExpiresAt) > new Date();
+        return {
+          ...p,
+          isBoosted: !!currentlyBoosted,
+          // Link only clickable if currently boosted
+          externalLink: currentlyBoosted ? p.externalLink : null
+        };
+      });
+
+      feed.push(...processedPosts);
     } catch (dbErr) {
       console.error('[Feed Shard Intercepted]', dbErr.message);
     }
   }
-  feed.sort((a, b) => b.score - a.score);
-  res.json(feed.slice(0, 20));
+
+  // Sorting: Boosted posts first, then by score descending
+  feed.sort((a, b) => {
+    if (a.isBoosted && !b.isBoosted) return -1;
+    if (!a.isBoosted && b.isBoosted) return 1;
+    return b.score - a.score;
+  });
+
+  res.json(feed.slice(0, 30));
 });
 
 app.get('/api/post/:id', async (req, res) => {
@@ -809,6 +886,8 @@ app.get('/api/post/:id', async (req, res) => {
       return res.status(404).json({ error: 'Post not found' });
     }
 
+    const currentlyBoosted = target.post.isBoosted && target.post.boostExpiresAt && new Date(target.post.boostExpiresAt) > new Date();
+
     res.json({
       id: target.post.id,
       userId: target.post.userId,
@@ -819,28 +898,32 @@ app.get('/api/post/:id', async (req, res) => {
       b2Shard: target.post.b2Shard,
       likes: target.post.likes,
       comments: target.post.comments,
-      views: target.post.views
+      views: target.post.views,
+      caption: target.post.caption || '',
+      isBoosted: !!currentlyBoosted,
+      externalLink: currentlyBoosted ? target.post.externalLink : null
     });
   } catch (err) {
     res.status(500).json({ error: 'Post load failed' });
   }
 });
+
+// ========== PAYMENT & WALLET SYSTEMS ==========
 const GIFT_PACKS = {
   RUBY: { ngn: 5000, points: 200, giftsTotal: 100 },
   GOLD: { ngn: 10000, points: 500, giftsTotal: 100 },
   DIAMOND: { ngn: 15000, points: 1000, giftsTotal: 100 }
 };
-// ========== PAYMENT & WALLET SYSTEMS ==========
 
 app.post('/api/deposit/init', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
-    const { tierAmount } = req.body; // 1500, 7000
+    const { tierAmount } = req.body; 
 
-    // HARD LOCK: Only 2 emergency tiers now
+    // Buy Points tiers via Selar
     const tiers = {
-      1500: 15000, // 1500 Naira = 15,000 freeCredits
-      7000: 70000 // 7000 Naira = 70,000 freeCredits
+      1500: 15000, 
+      7000: 70000 
     };
 
     const points = tiers[tierAmount];
@@ -857,7 +940,7 @@ app.post('/api/deposit/init', authenticateToken, async (req, res) => {
         points,
         token,
         status: 'PENDING',
-        meta: 'DEPOSIT', // important for /payment/verify
+        meta: 'DEPOSIT', 
         expiresAt: new Date(Date.now() + 30 * 60 * 1000)
       }
     });
@@ -873,7 +956,8 @@ app.post('/api/deposit/init', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/dm/init', authenticateToken, async (req, res) => {
-  const { userId } = req.user; const token = crypto.randomBytes(16).toString('hex');
+  const { userId } = req.user; 
+  const token = crypto.randomBytes(16).toString('hex');
   const db = getDbShard(userId);
   await db.client.deposit.create({ data: { id: crypto.randomBytes(8).toString('hex'), userId, amountNaira: 3000, points: 0, token, status: 'PENDING', meta: 'DM_UNLOCK', expiresAt: new Date(Date.now() + 30 * 60 * 1000) } });
   res.json({ selarLink: `https://selar.co/m/YOUR_STORE_SLUG/3000`, token });
@@ -881,11 +965,60 @@ app.post('/api/dm/init', authenticateToken, async (req, res) => {
 
 app.post('/api/gift/init', authenticateToken, async (req, res) => {
   const { userId } = req.user; const { giftType } = req.body;
-  const pack = { RUBY: {ngn:5000,points:200,giftsTotal:100}, GOLD:{ngn:10000,points:500,giftsTotal:100}, DIAMOND:{ngn:15000,points:1000,giftsTotal:100} }[giftType];
+  const pack = GIFT_PACKS[giftType];
   if(!pack) return res.status(400).json({error:"Invalid gift"});
   const token = crypto.randomBytes(16).toString('hex'); const db = getDbShard(userId);
   await db.client.deposit.create({ data: { id: crypto.randomBytes(8).toString('hex'), userId, amountNaira: pack.ngn, points: pack.points, token, status: 'PENDING', meta: `GIFT_${giftType}`, expiresAt: new Date(Date.now() + 30 * 60 * 1000) } });
   res.json({ selarLink: `https://selar.co/m/YOUR_STORE_SLUG/${pack.ngn}`, token });
+});
+
+// V5.1 Boost Initiation Engine
+app.post('/api/boost/init', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.user;
+    const { postId, tierAmount } = req.body; // 3500, 7500, 17000 Naira
+
+    const validTiers = {
+      3500: 1,   // 1 Day Boost
+      7500: 3,   // 3 Days Boost
+      17000: 7   // 7 Days Boost
+    };
+
+    if (!validTiers[tierAmount]) {
+      return res.status(400).json({ error: 'Invalid boost tier amount. Choose 3500, 7500, or 17000' });
+    }
+
+    const postContext = await findPostAcrossShards(postId);
+    if (!postContext) return res.status(404).json({ error: 'Post not found across network shards' });
+
+    if (postContext.post.userId !== userId) {
+      return res.status(403).json({ error: 'Cannot boost another user\'s post' });
+    }
+
+    const token = crypto.randomBytes(16).toString('hex');
+    const db = getDbShard(userId);
+
+    await db.client.deposit.create({
+      data: {
+        id: crypto.randomBytes(8).toString('hex'),
+        userId,
+        amountNaira: tierAmount,
+        points: 0,
+        token,
+        status: 'PENDING',
+        meta: `BOOST_${postId}_${tierAmount}`,
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000) // 30min checkout hold
+      }
+    });
+
+    res.json({
+      selarLink: `https://selar.co/m/YOUR_STORE_SLUG/${tierAmount}`,
+      token
+    });
+  } catch (err) {
+    console.error('[Boost Init Error]', err.message);
+    res.status(500).json({ error: 'Boost deployment initialization failed' });
+  }
 });
 
 app.post('/api/payment/verify', authenticateToken, async (req, res) => {
@@ -894,7 +1027,7 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
     const { tx_ref, token, passToken } = req.body;
 
     if (!(await internalVerifyPassToken(passToken))) return res.status(400).json({ error: 'Math verification failed' });
-    if (!tx_ref ||!token) return res.status(400).json({ error: 'Missing tx_ref or token' });
+    if (!tx_ref || !token) return res.status(400).json({ error: 'Missing tx_ref or token' });
 
     const db = getDbShard(userId);
 
@@ -922,6 +1055,26 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
       if(!pack) return res.status(400).json({error:"Invalid gift"});
       ops.push(db.client.gift.create({ data:{ id: crypto.randomBytes(8).toString('hex'), buyerId: userId, giftType, price: deposit.amountNaira, pointsPerGift: pack.points, giftsSent: 0, giftsTotal: pack.giftsTotal, expiresAt: new Date(Date.now() + 30*24*60*60*1000) } }));
       resp.gift = giftType;
+    } else if (deposit.meta?.startsWith("BOOST_")) {
+      const parts = deposit.meta.split('_');
+      const targetPostId = parts[1];
+      const tierAmount = parseInt(parts[2]);
+
+      const validTiers = { 3500: 1, 7500: 3, 17000: 7 };
+      const durationDays = validTiers[tierAmount] || 1;
+      const expireDate = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000);
+
+      const targetPost = await findPostAcrossShards(targetPostId);
+      if (targetPost) {
+        ops.push(
+          targetPost.db.post.update({
+            where: { id: targetPostId },
+            data: { isBoosted: true, boostExpiresAt: expireDate }
+          })
+        );
+        resp.boosted = targetPostId;
+        resp.expiresAt = expireDate;
+      }
     } else {
       ops.push(
         db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: deposit.points } } }),
@@ -937,7 +1090,8 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Payment verification failed' });
   }
 });
-// 3. ADMIN: View all deposits to catch fraud
+
+// ========== ADMIN PORTS ==========
 app.get('/api/admin/deposits', requireAdmin, async (req, res) => {
   const all = [];
   for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
@@ -999,19 +1153,18 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
       daysToMonetize: Math.max(0, 7 - days),
       refsLeft: Math.max(0, 5 - refs),
       monetized: user.monetizeFlag,
-      followersProgress: `${followers}/10`, // NEW
-      daysProgress: `${days}/7` // NEW
+      followersProgress: `${followers}/10`, 
+      daysProgress: `${days}/7` 
     });
   } catch (err) {
     res.status(200).json({ freeCredits: 0, cashBalance: 0, todayEarnings: 0, degradedModeActive: true });
   }
 });
 
-// UPDATE USER PROFILE TO RETURN VERIFIED STATUS
 app.get('/api/user/:id', authenticateToken, async (req, res) => {
   try {
     const { id: targetId } = req.params;
-    const meId = req.user.userId; // FIXED
+    const meId = req.user.userId; 
     const db = getDbShard(targetId);
 
     const user = await db.client.user.findUnique({
@@ -1020,8 +1173,8 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
         id: true, 
         username: true, 
         createdAt: true, 
-        isVerified: true,  // FROM ROUTE 2
-        dmUnlocked: true   // FROM ROUTE 2
+        isVerified: true,  
+        dmUnlocked: true   
       }
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -1047,18 +1200,19 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
 
     const totalViews = posts.reduce((sum, p) => sum + p.views, 0);
     const totalLikes = posts.reduce((sum, p) => sum + p.likes, 0);
+    const monetized = await isUserMonetized(targetId);
 
     res.json({
       userId: targetId,
       username: user.username,
-      isVerified: user.isVerified,     // FROM ROUTE 2
-      dmUnlocked: user.dmUnlocked,     // FROM ROUTE 2
-      totalViews,                      // FROM ROUTE 1
-      totalLikes,                      // FROM ROUTE 1
-      totalPosts: posts.length,        // FROM ROUTE 1
-      followers,                       // FROM ROUTE 1
-      following,                       // FROM ROUTE 1
-      isFollowing,                     // FROM ROUTE 1
+      isVerified: user.isVerified || monetized,     
+      dmUnlocked: user.dmUnlocked || monetized,     
+      totalViews,                                      
+      totalLikes,                                      
+      totalPosts: posts.length,        
+      followers,                                       
+      following,                                       
+      isFollowing,                                     
       profileLink: `${APP_BASE_URL}/u/${targetId}`,
       referralLink: `${APP_BASE_URL}/auth.html?ref=${targetId}`
     });
@@ -1084,35 +1238,75 @@ app.post('/api/follow', authenticateToken, async (req, res) => {
 
 app.post('/api/unfollow', authenticateToken, async (req, res) => {
   const followerId = req.user.userId;
-  const { followingId } = req.body;
+  const { Carrot, followingId } = req.body;
   const db = getDbShard(followingId);
 
   await db.client.follow.deleteMany({ where: { followerId, followingId } });
   res.json({ success: true });
 });
 
+// ========== V5.1 REDESIGNED WITHDRAWAL GATEWAY ==========
 app.post('/api/wallet/withdraw', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
-    const { amountPoints, routingTarget, targetDetails } = req.body;
+    const { amountPoints, method, routingTarget, targetDetails } = req.body; // method: 'BANK' or 'USDT'
     const db = getDbShard(userId);
     const redis = getRedisShard(userId);
 
-    if (amountPoints < 50000) return res.status(400).json({ error: 'Minimum transfer barrier is 50,000 pts' });
+    // Minimum limit constraints
+    if (amountPoints < 50000) {
+      return res.status(400).json({ error: 'Minimum withdrawal dynamic baseline is 50,000 pts (₦5000)' });
+    }
+
+    // USDT specific validation matrix
+    if (method === 'USDT') {
+      if (amountPoints !== 120000 && amountPoints !== 12000000) {
+        return res.status(400).json({ error: 'USDT withdrawals are only allowed for exact tier bounds: 120,000 pts ($10) or 12,000,000 pts ($100)' });
+      }
+      // TRC20 Address compliance check (Starts with T, alphanumerical base)
+      const trc20Regex = /^T[A-Za-z1-9]{33}$/;
+      if (!trc20Regex.test(targetDetails?.trim())) {
+        return res.status(400).json({ error: 'Only USDT TRC20 addresses are allowed' });
+      }
+    } 
+    // Local bank specific validation matrix
+    else if (method === 'BANK') {
+      if (!targetDetails || !targetDetails.bankName || !targetDetails.accountNumber || !targetDetails.accountName) {
+        return res.status(400).json({ error: 'Nigeria Bank withdrawals require bankName, accountNumber, and accountName' });
+      }
+    } else {
+      return res.status(400).json({ error: 'Invalid withdrawal vector. Selection must be BANK or USDT' });
+    }
+
+    // Limit check: Max 1 payout submission permitted every 7 days (7 day hold check)
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const recentPayout = await db.client.payoutQueue.findFirst({
+      where: {
+        userId,
+        createdAt: { gte: sevenDaysAgo }
+      }
+    });
+
+    if (recentPayout) {
+      return res.status(429).json({ error: 'Withdrawal locked. Limit 1 withdrawal transaction per week.' });
+    }
 
     const user = await db.client.user.findUnique({ where: { id: userId } });
     if (!user.monetizeFlag || user.cashBalance < amountPoints) {
-      return res.status(400).json({ error: 'Financial criteria parameter denied' });
+      return res.status(400).json({ error: 'Financial criteria parameter denied: Insufficient cash balance or unmonetized account status' });
     }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    await redis.set(`withdraw_otp:${userId}`, JSON.stringify({ amountPoints, routingTarget, targetDetails, otp }), 'EX', 600).catch(() => {
-      global[`withdraw_otp_${userId}`] = { payload: { amountPoints, routingTarget, targetDetails, otp }, exp: Date.now() + 600000 };
+    const payload = { amountPoints, method, routingTarget, targetDetails, otp };
+
+    await redis.set(`withdraw_otp:${userId}`, JSON.stringify(payload), 'EX', 600).catch(() => {
+      global[`withdraw_otp_${userId}`] = { payload, exp: Date.now() + 600000 };
     });
 
     await sendEmail(user.email, 'Authorization OTP Sequence Generated', `<p>Withdrawal verification challenge code: <b>${otp}</b></p>`);
     res.json({ authChallenge: true });
   } catch (err) {
+    console.error('[Withdraw Init Error]', err.message);
     res.status(500).json({ error: 'Financial gateway breakdown bypass active' });
   }
 });
@@ -1137,7 +1331,14 @@ app.post('/api/wallet/withdraw/confirm', authenticateToken, async (req, res) => 
     await db.client.$transaction([
       db.client.user.update({ where: { id: userId }, data: { cashBalance: { decrement: parsed.amountPoints } } }),
       db.client.payoutQueue.create({
-        data: { id: crypto.randomBytes(8).toString('hex'), userId, amountPoints: parsed.amountPoints, routingTarget: parsed.routingTarget, targetDetails: parsed.targetDetails, status: 'PENDING' }
+        data: { 
+          id: crypto.randomBytes(8).toString('hex'), 
+          userId, 
+          amountPoints: parsed.amountPoints, 
+          routingTarget: parsed.routingTarget || parsed.method, 
+          targetDetails: typeof parsed.targetDetails === 'object' ? JSON.stringify(parsed.targetDetails) : parsed.targetDetails, 
+          status: 'PENDING' 
+        }
       })
     ]);
     await redis.del(`withdraw_otp:${userId}`).catch(() => {});
@@ -1186,7 +1387,7 @@ app.post('/api/admin/posts/:id/reject', requireAdmin, async (req, res) => {
   
   await target.db.$transaction([
     target.db.post.update({ where: { id }, data: { status: 'REJECTED' } }),
-    target.db.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } }) // FIX: Fixed dangling syntax bracket
+    target.db.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } }) 
   ]);
   res.json({ success: true, refunded: refundAmount });
 });
@@ -1233,7 +1434,120 @@ app.post('/api/admin/payouts/reject', requireAdmin, async (req, res) => {
   }
 });
 
-// ========== CRON BUFFER INGESTION ENGINE ==========
+// ========== V5.1 NEW SUPPORT TICKETING MATRIX ==========
+app.post('/api/support/send', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.user;
+    const { subject, message } = req.body;
+    if (!subject || !message) return res.status(400).json({ error: 'Missing subject or message body' });
+
+    const db = getDbShard(userId);
+    const ticketId = crypto.randomBytes(8).toString('hex');
+
+    await db.client.supportTicket.create({
+      data: {
+        id: ticketId,
+        userId,
+        subject: subject.trim(),
+        message: message.trim(),
+        status: 'PENDING',
+        reply: ''
+      }
+    });
+
+    res.status(201).json({ success: true, ticketId });
+  } catch (err) {
+    res.status(500).json({ error: 'Technical support pipeline dispatch failure' });
+  }
+});
+
+app.get('/api/support/my', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.user;
+    const db = getDbShard(userId);
+
+    const tickets = await db.client.supportTicket.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    res.json(tickets);
+  } catch (err) {
+    res.status(500).json({ error: 'Could not fetch support timeline logs' });
+  }
+});
+
+app.get('/api/admin/support', requireAdmin, async (req, res) => {
+  try {
+    const all = [];
+    for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
+      const tickets = await db.supportTicket.findMany({
+        where: { status: 'PENDING' },
+        orderBy: { createdAt: 'desc' }
+      }).catch(() => []);
+      all.push(...tickets);
+    }
+    res.json(all);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to retrieve active ticket streams' });
+  }
+});
+
+app.post('/api/admin/support/reply', requireAdmin, async (req, res) => {
+  try {
+    const { ticketId, userId, reply } = req.body;
+    if (!ticketId || !userId || !reply) return res.status(400).json({ error: 'Missing ticket transaction credentials' });
+
+    const db = getDbShard(userId);
+    await db.client.supportTicket.update({
+      where: { id: ticketId },
+      data: { reply: reply.trim(), status: 'RESOLVED' }
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to process admin support verification step' });
+  }
+});
+
+// ========== SOCKET.IO & V4.6 FALLBACK MESSAGING ==========
+app.post('/api/message/send', authenticateToken, requireDMUnlock, async (req,res)=>{
+  const {receiverId, text} = req.body;
+  const senderId = req.user.userId;
+  const db = getDbShard(receiverId);
+  await db.client.message.create({data:{id:crypto.randomBytes(8).toString('hex'), senderId, receiverId, text}});
+  res.json({sent:true})
+})
+
+app.get('/api/messages/:userId', authenticateToken, async (req,res)=>{
+  const me = req.user.userId; 
+  const other = req.params.userId;
+  const db = getDbShard(me);
+  const msgs = await db.client.message.findMany({
+    where:{ OR:[{senderId:me, receiverId:other},{senderId:other, receiverId:me}] },
+    orderBy:{createdAt:'asc'}, take:100
+  });
+  res.json(msgs)
+})
+
+app.post('/api/gift/send', authenticateToken, async (req,res)=>{
+  const {receiverId} = req.body;
+  const senderId = req.user.userId;
+  const db = getDbShard(senderId);
+
+  const gift = await db.client.gift.findFirst({where:{buyerId:senderId, expiresAt:{gt:new Date()}, giftsSent:{lt:100}}});
+  if(!gift) return res.status(400).json({error:"No active gift pack"});
+
+  await db.client.$transaction([
+    db.client.gift.update({where:{id:gift.id}, data:{giftsSent:{increment:1}}}),
+    processWalletTransaction({userId:receiverId, action:'GIFT', isCreator:true, meta:{points:gift.pointsPerGift, refId:gift.id}})
+  ])
+  res.json({success:true, pointsSent:gift.pointsPerGift})
+})
+
+// ========== CHORE SYSTEM SCHEDULER CRON SERVICES ==========
+
+// 1. Cron Buffer Ingestion Engine (Every 10 seconds)
 cron.schedule('*/10 * * * * *', async () => {
   if (interactionBuffer.length === 0) return;
 
@@ -1307,14 +1621,19 @@ cron.schedule('*/10 * * * * *', async () => {
   }
 });
 
+// requireDMUnlock middleware checks monetization OR dmUnlocked status
 async function requireDMUnlock(req,res,next){
-  const userId = req.user.userId; // FIXED
+  const userId = req.user.userId; 
+  const monetized = await isUserMonetized(userId);
+  if(monetized) return next();
+
   const db = getDbShard(userId);
   const u = await db.client.user.findUnique({where:{id:userId}});
-  if(!u?.dmUnlocked) return res.status(403).json({error:"Unlock DM for 3000"});
+  if(!u?.dmUnlocked) return res.status(403).json({error:"Unlock DM for 3000 or gain monetization (7 days + 10 followers)"});
   next();
 }
 
+// 2. Nightly Monetization Evaluation (00:00 Daily)
 cron.schedule('0 0 * * *', async () => {
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
   for (const db of targets) {
@@ -1324,7 +1643,7 @@ cron.schedule('0 0 * * *', async () => {
         const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000);
         let followers = 0;
         for(const shard of targets) followers += await shard.follow.count({ where: { followingId: user.id } }).catch(()=>0);
-        if (days >= 7 && followers >= 10) { // CHANGED: was refs >=5
+        if (days >= 7 && followers >= 10) { 
           await db.user.update({ where: { id: user.id }, data: { monetizeFlag: true, freeFarmingStopped: true } });
           await sendEmail(user.email, 'Monetization Activated!', `You hit 7 days + 10 followers. Earnings now go to Cash.`);
         }
@@ -1333,6 +1652,7 @@ cron.schedule('0 0 * * *', async () => {
   }
 });
 
+// 3. Referral Evaluation Engine (Every 5 minutes)
 cron.schedule('*/5 * * * *', async () => {
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
   for (const db of targets) {
@@ -1352,8 +1672,9 @@ cron.schedule('*/5 * * * *', async () => {
   }
 });
 
+// 4. B2 Media Clean up & Deletion (Every Day at 3:00 AM) - Skip Boosted Posts
 cron.schedule('0 3 * * *', async () => {
-  const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
+  const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000); // 15 Days Purge cutoff
   const clusters = [
     { db: prismaClients.db1, b2: b2Clients.b2a, bucket: b2Config.a.bucket },
     { db: prismaClients.db2, b2: b2Clients.b2b, bucket: b2Config.b.bucket },
@@ -1361,7 +1682,17 @@ cron.schedule('0 3 * * *', async () => {
   ];
   for (const c of clusters) {
     try {
-      const posts = await c.db.post.findMany({ where: { createdAt: { lt: cutoff } } });
+      // Find posts older than 15 days that are NOT boosted
+      const posts = await c.db.post.findMany({ 
+        where: { 
+          createdAt: { lt: cutoff },
+          OR: [
+            { isBoosted: false },
+            { isBoosted: null }
+          ]
+        } 
+      });
+
       for (const p of posts) {
         if (p.mediaUrl && !p.mediaUrl.startsWith('http')) {
           await c.b2.send(new DeleteObjectCommand({ Bucket: c.bucket, Key: p.mediaUrl })).catch(() => {});
@@ -1369,13 +1700,22 @@ cron.schedule('0 3 * * *', async () => {
           await c.b2.send(new DeleteObjectCommand({ Bucket: c.bucket, Key: thumbKey })).catch(() => {});
         }
       }
-      await c.db.post.deleteMany({ where: { createdAt: { lt: cutoff } } });
+      await c.db.post.deleteMany({ 
+        where: { 
+          createdAt: { lt: cutoff },
+          OR: [
+            { isBoosted: false },
+            { isBoosted: null }
+          ]
+        } 
+      });
     } catch (cronErr) {
       console.error('[B2 Cron Purge Exception]', cronErr.message);
     }
   }
 });
 
+// 5. Score Recalculator Engine (Every 5 minutes)
 cron.schedule('*/5 * * * *', async () => {
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
   for (const db of targets) {
@@ -1392,48 +1732,35 @@ cron.schedule('*/5 * * * *', async () => {
   }
 });
 
-// ========== V4.6.2 NEW ROUTES ==========
-
-app.post('/api/message/send', authenticateToken, requireDMUnlock, async (req,res)=>{
-  const {receiverId, text} = req.body;
-  const senderId = req.user.userId;
-  const db = getDbShard(receiverId);
-  await db.client.message.create({data:{id:crypto.randomBytes(8).toString('hex'), senderId, receiverId, text}});
-  res.json({sent:true})
-})
-
-app.get('/api/messages/:userId', authenticateToken, async (req,res)=>{
-  const me = req.user.userId; 
-  const other = req.params.userId;
-  const db = getDbShard(me);
-  const msgs = await db.client.message.findMany({
-    where:{ OR:[{senderId:me, receiverId:other},{senderId:other, receiverId:me}] },
-    orderBy:{createdAt:'asc'}, take:100
-  });
-  res.json(msgs)
-})
-
-app.post('/api/gift/send', authenticateToken, async (req,res)=>{
-  const {receiverId} = req.body;
-  const senderId = req.user.userId;
-  const db = getDbShard(senderId);
-
-  const gift = await db.client.gift.findFirst({where:{buyerId:senderId, expiresAt:{gt:new Date()}, giftsSent:{lt:100}}});
-  if(!gift) return res.status(400).json({error:"No active gift pack"});
-
-  await db.client.$transaction([
-    db.client.gift.update({where:{id:gift.id}, data:{giftsSent:{increment:1}}}),
-    processWalletTransaction({userId:receiverId, action:'GIFT', isCreator:true, meta:{points:gift.pointsPerGift, refId:gift.id}})
-  ])
-  res.json({success:true, pointsSent:gift.pointsPerGift})
-})
+// 6. Boost Expiration Cron System (Every 1 hour)
+cron.schedule('0 * * * *', async () => {
+  const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+  for (const db of targets) {
+    try {
+      const expired = await db.post.updateMany({
+        where: {
+          isBoosted: true,
+          boostExpiresAt: { lt: new Date() }
+        },
+        data: {
+          isBoosted: false
+        }
+      });
+      if (expired.count > 0) {
+        console.log(`[Boost Engine] Expired ${expired.count} posts from matrix index.`);
+      }
+    } catch (err) {
+      console.error('[Boost Expiration Process Error]', err.message);
+    }
+  }
+});
 
 // ========== HEALTH CHECK UP ==========
 app.get('/', (req, res) => {
-  res.status(200).json({ status: "online", core: "GolViral Hardened Engine Infrastructure Matrix", version: "4.5" });
+  res.status(200).json({ status: "online", core: "GolViral Hardened Engine Infrastructure Matrix", version: "5.1" });
 });
 
 // ========== START PORT BOOTSTRAP ==========
-server.listen(PORT, () => { // CHANGED FROM app.listen
+server.listen(PORT, () => { 
   console.log(`[SYSTEM BOOT SUCCESSFUL] WS + HTTP Listening on port: ${PORT}`);
 });
