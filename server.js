@@ -1708,7 +1708,7 @@ app.post('/api/notifications/read/:id', authenticateToken, async (req, res) => {
 cron.schedule('*/10 * * * * *', async () => {
   if (interactionBuffer.length === 0) return;
 
-const batch = [...interactionBuffer];
+  const batch = [...interactionBuffer];
   interactionBuffer = [];
 
   const failedItems = [];
@@ -1737,18 +1737,18 @@ const batch = [...interactionBuffer];
             select: { views: true, userId: true, title: true, type: true }
           }).catch(() => null);
           
-          if(p && MILESTONES.includes(p.views)){
+          if (p && MILESTONES.includes(p.views)) {
             const milestoneKey = `milestone:${item.postId}`;
-            const alreadySent = await redis.sismember(milestoneKey, p.views).catch(()=>0);
-            if(!alreadySent){
-              await redis.sadd(milestoneKey, p.views).catch(()=>{});
-              await redis.expire(milestoneKey, 30 * 24 * 60 * 60).catch(()=>{});
+            const alreadySent = await redis.sismember(milestoneKey, p.views).catch(() => 0);
+            if (!alreadySent) {
+              await redis.sadd(milestoneKey, p.views).catch(() => {});
+              await redis.expire(milestoneKey, 30 * 24 * 60 * 60).catch(() => {});
               await sendNotification(
                 p.userId, 
                 'VIRAL', 
-                `🔥 ${p.views >= 1000 ? p.views/1000+'K' : p.views} Views!`, 
-                `Your ${p.type} "${p.title.slice(0,20)}" just hit ${p.views.toLocaleString()} views!`
-              ).catch(()=>{});
+                `🔥 ${p.views >= 1000 ? p.views / 1000 + 'K' : p.views} Views!`, 
+                `Your ${p.type} "${p.title.slice(0, 20)}" just hit ${p.views.toLocaleString()} views!`
+              ).catch(() => {});
             }
           }
         }
@@ -1756,12 +1756,12 @@ const batch = [...interactionBuffer];
       } else if (item.type === 'LIKE') {
         await processWalletTransaction({ userId: item.userId, action: 'LIKE', isCreator: true, meta: { refId: item.postId } });
         await processWalletTransaction({ userId: item.actorId, action: 'LIKE', isCreator: false, meta: { refId: item.postId } });
-        await db.client.post.update({ where: { id: item.postId }, data: { likes: { increment: 1 } }).catch(() => {}); // FIXED }
+        await db.client.post.update({ where: { id: item.postId }, data: { likes: { increment: 1 } } }).catch(() => {});
 
       } else if (item.type === 'COMMENT') {
         await processWalletTransaction({ userId: item.userId, action: 'COMMENT', isCreator: true, meta: { refId: item.postId } });
         await processWalletTransaction({ userId: item.actorId, action: 'COMMENT', isCreator: false, meta: { refId: item.postId } });
-        await db.client.post.update({ where: { id: item.postId }, data: { comments: { increment: 1 } }).catch(() => {}); // FIXED }
+        await db.client.post.update({ where: { id: item.postId }, data: { comments: { increment: 1 } } }).catch(() => {});
 
       } else if (item.type === 'READ') {
         const redis = getRedisShard(item.userId);
