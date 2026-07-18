@@ -1732,10 +1732,10 @@ cron.schedule('*/10 * * * * *', async () => {
           
           await db.client.post.update({ 
             where: { id: item.postId }, 
-            data: { views: { increment: 1 } } ;
+            data: { views: { increment: 1 } } 
             if([100, 1000, 10000, 100000].includes(p.views + 1)){
            sendNotification(item.userId, 'VIRAL', 'Your Reel is Blowing Up! 🔥', `Your reel hit ${p.views + 1} views!`);
-         }
+    
           }).catch(() => {});
         }
 
