@@ -32,7 +32,9 @@ model User {
   messagesSent Message[] @relation("SentMessages")
   messagesReceived Message[] @relation("ReceivedMessages")
   gifts Gift[]
-  supportTickets SupportTicket[] // NEW V5.1
+  supportTickets SupportTicket[]
+  notifications Notification[] // NEW V5.2
+  pushSubs PushSubscription[] // NEW V5.2
 
   // Follow relations
   followers Follow[] @relation("Followers")
@@ -76,10 +78,10 @@ model Post {
   content String @default("") @db.Text
   mediaUrl String @db.Text
   thumbnailUrl String @db.Text
-  status String @db.VarChar(20) // PRE_UPLOAD, ACTIVE, REJECTED
+  status String @db.VarChar(20) // PRE_UPLOAD, ACTIVE, REJECTED, ARCHIVED // ADDED ARCHIVED
   b2Shard Int @default(0)
 
-  // V5.1 NEW FIELDS
+  // V5.1 + V5.2 FIELDS
   caption String? @db.Text
   externalLink String? @db.Text
   isBoosted Boolean @default(false)
@@ -215,7 +217,7 @@ model Gift {
   @@index([expiresAt])
 }
 
-// ========== NEW V5.1: SUPPORT TICKETS ==========
+// ========== SUPPORT TICKETS ==========
 model SupportTicket {
   id String @id @db.VarChar(16)
   userId String @db.VarChar(16)
@@ -231,4 +233,36 @@ model SupportTicket {
   @@index([userId])
   @@index([status])
   @@index([createdAt])
+}
+
+// ========== NEW V5.2: NOTIFICATIONS ==========
+model Notification {
+  id String @id @default(cuid())
+  userId String @db.VarChar(16)
+  type String @db.VarChar(30) // FOLLOW, COMMENT, DM, GIFT, WITHDRAW, MONETIZE, VIRAL
+  title String @db.VarChar(100)
+  body String @db.Text
+  data Json? // {postId, fromUserId, etc}
+  isRead Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([createdAt])
+}
+
+// ========== NEW V5.2: PUSH SUBSCRIPTIONS ==========
+model PushSubscription {
+  id String @id @default(cuid())
+  userId String @db.VarChar(16)
+  endpoint String @unique @db.Text
+  p256dh String @db.Text
+  auth String @db.Text
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
