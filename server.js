@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const webpush = require('web-push'); // npm i web-push
 
 // ========== ENV CONFIG ==========
 const PORT = process.env.PORT || 10000;
@@ -90,6 +91,13 @@ const b2Clients = {
   b2b: new S3Client({ endpoint: b2Config.b.endpoint, credentials: { accessKeyId: b2Config.b.key, secretAccessKey: b2Config.b.secret }, region: 'us-west-000' }),
   b2c: new S3Client({ endpoint: b2Config.c.endpoint, credentials: { accessKeyId: b2Config.c.key, secretAccessKey: b2Config.c.secret }, region: 'us-west-000' }),
 };
+
+// SET VAPID KEYS ONCE. Replace with your real keys
+webpush.setVapidDetails(
+  'mailto:carl56590@gmail.com',
+  process.env.VAPID_PUBLIC_KEY || 'BEl0YourPublicKeyHere',
+  process.env.VAPID_PRIVATE_KEY || 'YourPrivateKeyHere'
+);
 
 // ========== SHARDING ROUTING HELPERS ==========
 function getShardIndex(id) {
@@ -1545,6 +1553,137 @@ app.post('/api/gift/send', authenticateToken, async (req,res)=>{
   res.json({success:true, pointsSent:gift.pointsPerGift})
 })
 
+// ========== HELPER: SEND NOTIFICATION ==========
+async function sendNotification(userId, type, title, body, data = {}) {
+  const db = getDbShard(userId);
+  
+  // 1. Save to DB for bell icon
+  await db.client.notification.create({
+    data: { userId, type, title, body, data }
+  }).catch(()=>{});
+
+  // 2. Send web push if user subscribed
+  const subs = await db.client.pushSubscription.findMany({ where: { userId } }).catch(()=>[]);
+  for(const sub of subs){
+    const pushSubscription = { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } };
+    webpush.sendNotification(pushSubscription, JSON.stringify({title, body, data})).catch(async () => {
+      // Delete dead subscription
+      await db.client.pushSubscription.delete({ where: { id: sub.id } }).catch(()=>{});
+    });
+  }
+}
+
+// ========== ENDPOINT 1: PROFILE POSTS ==========
+app.get('/api/user/:id/posts', async (req, res) => {
+  try {
+    const { id: targetId } = req.params;
+    const { page = 1, limit = 12 } = req.query;
+    const db = getDbShard(targetId);
+    
+    const posts = await db.client.post.findMany({
+      where: { userId: targetId, status: { in: ['ACTIVE', 'ARCHIVED'] } },
+      orderBy: { createdAt: 'desc' },
+      skip: (Number(page) - 1) * Number(limit),
+      take: Number(limit)
+    });
+
+    const processed = posts.map(p => ({
+      ...p,
+      mediaUrl: p.status === 'ARCHIVED' ? null : p.mediaUrl,
+      thumbnailUrl: p.status === 'ARCHIVED' ? null : p.thumbnailUrl
+    }));
+    res.json(processed);
+  } catch (err) { res.status(500).json({ error: 'Failed to load user posts' }); }
+});
+
+// ========== ENDPOINT 2: EXPLORE ==========
+app.get('/api/explore', async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const feed = [];
+    const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    for (const db of targets) {
+      const posts = await db.post.findMany({
+        where: { status: 'ACTIVE', type: 'reel', views: { gte: 50 }, createdAt: { gte: sevenDaysAgo } },
+        take: 30
+      }).catch(()=>[]);
+      feed.push(...posts);
+    }
+
+    feed.sort((a, b) => {
+      const aBoost = a.isBoosted && a.boostExpiresAt && new Date(a.boostExpiresAt) > new Date();
+      const bBoost = b.isBoosted && b.boostExpiresAt && new Date(b.boostExpiresAt) > new Date();
+      if (aBoost && !bBoost) return -1;
+      if (!aBoost && bBoost) return 1;
+      return b.score - a.score;
+    });
+    res.json(feed.slice((page-1)*limit, page*limit));
+  } catch (err) { res.status(500).json({ error: 'Failed to load explore' }); }
+});
+
+// ========== ENDPOINT 3: SEARCH USERS ==========
+app.get('/api/search/users', authenticateToken, async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || q.trim().length < 2) return res.json([]);
+    const searchTerm = q.trim();
+    const allUsers = [];
+    const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+    
+    for (const db of dbs) {
+      const users = await db.user.findMany({
+        where: { username: { contains: searchTerm, mode: 'insensitive' } },
+        select: { id: true, username: true, isVerified: true },
+        take: 20
+      }).catch(()=>[]);
+      
+      for(const u of users){
+        let followers = 0;
+        for(const shard of dbs) followers += await shard.follow.count({ where: { followingId: u.id } }).catch(() => 0);
+        allUsers.push({...u, followers})
+      }
+    }
+    allUsers.sort((a,b) => b.followers - a.followers);
+    res.json(allUsers.slice(0, 20));
+  } catch (err) { res.status(500).json({ error: 'Search failed' }); }
+});
+
+// ========== ENDPOINT 4-7: PUSH SYSTEM ==========
+app.post('/api/push/subscribe', authenticateToken, async (req, res) => {
+  const { userId } = req.user;
+  const { subscription } = req.body; // {endpoint, keys:{p256dh, auth}}
+  const db = getDbShard(userId);
+  await db.client.pushSubscription.upsert({
+    where: { endpoint: subscription.endpoint },
+    update: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth },
+    create: { userId, endpoint: subscription.endpoint, p256dh: subscription.keys.p256dh, auth: subscription.keys.auth }
+  });
+  res.json({success: true});
+});
+
+app.post('/api/push/unsubscribe', authenticateToken, async (req, res) => {
+  const { endpoint } = req.body;
+  const db = getDbShard(req.userId);
+  await db.client.pushSubscription.delete({ where: { endpoint } }).catch(()=>{});
+  res.json({success: true});
+});
+
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+  const { userId } = req.user;
+  const { page = 1, limit = 20 } = req.query;
+  const db = getDbShard(userId);
+  const notifs = await db.client.notification.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, skip: (page-1)*limit, take: Number(limit) });
+  res.json(notifs);
+});
+
+app.post('/api/notifications/read/:id', authenticateToken, async (req, res) => {
+  const db = getDbShard(req.userId);
+  await db.client.notification.update({ where: { id: req.params.id }, data: { isRead: true } }).catch(()=>{});
+  res.json({success: true});
+});
+
 // ========== CHORE SYSTEM SCHEDULER CRON SERVICES ==========
 
 // 1. Cron Buffer Ingestion Engine (Every 10 seconds)
@@ -1673,8 +1812,9 @@ cron.schedule('*/5 * * * *', async () => {
 });
 
 // 4. B2 Media Clean up & Deletion (Every Day at 3:00 AM) - Skip Boosted Posts
+// 4. B2 Media Archive & Cleanup (Every Day at 3:00 AM)
 cron.schedule('0 3 * * *', async () => {
-  const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000); // 15 Days Purge cutoff
+  const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
   const clusters = [
     { db: prismaClients.db1, b2: b2Clients.b2a, bucket: b2Config.a.bucket },
     { db: prismaClients.db2, b2: b2Clients.b2b, bucket: b2Config.b.bucket },
@@ -1682,36 +1822,18 @@ cron.schedule('0 3 * * *', async () => {
   ];
   for (const c of clusters) {
     try {
-      // Find posts older than 15 days that are NOT boosted
       const posts = await c.db.post.findMany({ 
-        where: { 
-          createdAt: { lt: cutoff },
-          OR: [
-            { isBoosted: false },
-            { isBoosted: null }
-          ]
-        } 
+        where: { createdAt: { lt: cutoff }, status: 'ACTIVE', OR: [{ isBoosted: false }, { isBoosted: null }] } 
       });
-
       for (const p of posts) {
         if (p.mediaUrl && !p.mediaUrl.startsWith('http')) {
           await c.b2.send(new DeleteObjectCommand({ Bucket: c.bucket, Key: p.mediaUrl })).catch(() => {});
           const thumbKey = p.mediaUrl.replace('media/', 'thumbs/').replace(/\.[^/.]+$/, ".jpg");
           await c.b2.send(new DeleteObjectCommand({ Bucket: c.bucket, Key: thumbKey })).catch(() => {});
         }
+        await c.db.post.update({ where: { id: p.id }, data: { status: 'ARCHIVED', mediaUrl: null, thumbnailUrl: null } }).catch(() => {});
       }
-      await c.db.post.deleteMany({ 
-        where: { 
-          createdAt: { lt: cutoff },
-          OR: [
-            { isBoosted: false },
-            { isBoosted: null }
-          ]
-        } 
-      });
-    } catch (cronErr) {
-      console.error('[B2 Cron Purge Exception]', cronErr.message);
-    }
+    } catch (cronErr) { console.error('[B2 Cron Archive Exception]', cronErr.message); }
   }
 });
 
