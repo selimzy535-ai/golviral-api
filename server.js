@@ -232,6 +232,10 @@ io.on('connection', (socket) => {
     if(receiverSocketId){
       io.to(receiverId).emit('receive_message', msg);
     }
+
+ const senderDb = getDbShard(socket.userId);
+const senderUser = await senderDb.client.user.findUnique({where:{id:socket.userId}});
+sendNotification(receiverId, 'DM', 'New Message', `Message from ${senderUser.username}`);
     
     socket.emit('receive_message', msg);
   });
@@ -789,6 +793,10 @@ app.post('/api/comment', authenticateToken, async (req, res) => {
       data: { postId, userId: actorId, text: text.trim().slice(0, 500) }
     });
 
+    const actorDb = getDbShard(actorId);
+    const actorUser = await actorDb.client.user.findUnique({where:{id:actorId}});
+    sendNotification(creatorId, 'COMMENT', 'New Comment', `${actorUser.username} commented: ${text.slice(0,40)}`);
+    
     interactionBuffer.push({ type: 'COMMENT', postId, userId: creatorId, actorId, timestamp: Date.now() });
     res.status(201).json({ success: true });
   } catch (err) {
@@ -1238,9 +1246,15 @@ app.post('/api/follow', authenticateToken, async (req, res) => {
 
   try {
     await db.client.follow.create({ data: { followerId, followingId } });
+
+    const followerDb = getDbShard(followerId);
+    const followerUser = await followerDb.client.user.findUnique({where:{id:followerId}});
+    sendNotification(followingId, 'FOLLOW', 'New Follower', `${followerUser.username} started following you`);
+    res.status(400).json({ error: 'Already following' });
+    
     res.json({ success: true });
   } catch (e) {
-    res.status(400).json({ error: 'Already following' });
+    
   }
 });
 
@@ -1420,6 +1434,10 @@ app.post('/api/admin/payouts/approve', requireAdmin, async (req, res) => {
   try {
     const { payoutId, userId } = req.body;
     await getDbShard(userId).client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'APPROVED' } });
+
+    const amount = payout.amountPoints / 10;
+    sendNotification(userId, 'WITHDRAW', 'Withdrawal Approved ✅', `Your ₦${amount} withdrawal is approved and processing`);
+    
     res.json({ success: true });
   } catch {
     res.status(500).json({ error: 'Ledger tracking execution failed' });
@@ -1550,6 +1568,7 @@ app.post('/api/gift/send', authenticateToken, async (req,res)=>{
     db.client.gift.update({where:{id:gift.id}, data:{giftsSent:{increment:1}}}),
     processWalletTransaction({userId:receiverId, action:'GIFT', isCreator:true, meta:{points:gift.pointsPerGift, refId:gift.id}})
   ])
+  sendNotification(receiverId, 'GIFT', 'Gift Received! 🎁', `You received ${gift.giftType} gift! +${gift.pointsPerGift} pts`);
   res.json({success:true, pointsSent:gift.pointsPerGift})
 })
 
@@ -1715,6 +1734,9 @@ cron.schedule('*/10 * * * * *', async () => {
           await db.client.post.update({ 
             where: { id: item.postId }, 
             data: { views: { increment: 1 } } 
+            if([100, 1000, 10000, 100000].includes(p.views + 1)){
+  sendNotification(item.userId, 'VIRAL', 'Your Reel is Blowing Up! 🔥', `Your reel hit ${p.views + 1} views!`);
+}
           }).catch(() => {});
         }
 
@@ -1784,6 +1806,7 @@ cron.schedule('0 0 * * *', async () => {
         for(const shard of targets) followers += await shard.follow.count({ where: { followingId: user.id } }).catch(()=>0);
         if (days >= 7 && followers >= 10) { 
           await db.user.update({ where: { id: user.id }, data: { monetizeFlag: true, freeFarmingStopped: true } });
+          sendNotification(user.id, 'MONETIZE', 'Congrats! You\'re Earning 💰', 'You hit 7 days + 10 followers. Earnings now go to Cash.');
           await sendEmail(user.email, 'Monetization Activated!', `You hit 7 days + 10 followers. Earnings now go to Cash.`);
         }
       }
