@@ -594,7 +594,6 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 });
 
-// ========== POST CREATION & PROCESSING PORTS ==========
 app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
   const { userId } = req.user;
   const { fileExtension, contentType, postType, caption, externalLink } = req.body;
@@ -612,62 +611,82 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     const fee = (postType === 'novel' || postType === 'story' || postType === 'store') ? 10 : 25;
     if (user.freeCredits < fee) return res.status(400).json({ error: `Insufficient points: Need ${fee} credits` });
 
-    // V5.1 Constraint - Maximum 3 posts limit per day: exactly 1 reel, 1 novel, 1 story (no duplication of same type)
+    // ===== TESTING LIMIT: 15 per day per type =====
     const startOfToday = new Date();
     startOfToday.setHours(0,0,0,0);
-    const postsToday = await db.client.post.findMany({
+    const countToday = await db.client.post.count({
       where: {
         userId,
+        type: postType,
         createdAt: { gte: startOfToday }
-      },
-      select: { type: true }
+      }
     });
-
-    if (postsToday.length >= 3) {
-      return res.status(429).json({ error: 'Daily posting limit of 3 posts reached.' });
+    const DAILY_LIMIT = 15;
+    if (countToday >= DAILY_LIMIT) {
+      return res.status(429).json({ error: `Daily ${postType} limit reached: ${DAILY_LIMIT}` });
     }
+    // ===== END TESTING LIMIT =====
 
-    const normalizedType = (postType === 'story' || postType === 'store') ? 'story' : postType;
-    const alreadyHasType = postsToday.some(p => {
-      const existingType = (p.type === 'story' || p.type === 'store') ? 'story' : p.type;
-      return existingType === normalizedType;
-    });
-
-    if (alreadyHasType) {
-      return res.status(429).json({ error: `You have already posted a ${normalizedType} today. Only 1 reel, 1 novel, and 1 story is allowed per day.` });
-    }
-
-    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } } });
+    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } });
 
     const postId = crypto.randomBytes(8).toString('hex');
     const b2 = getB2Shard(userId);
 
-    // ===== iPhone.MOV Support =====
-    const allowedTypes = ['video/mp4', 'video/quicktime', 'video/mov'];
-    const ct = allowedTypes.includes(contentType) ? contentType : 'video/mp4';
-
-    let ext = fileExtension;
-    if (!ext) {
-      ext = ct === 'video/quicktime' ? 'mov' : 'mp4';
-    }
-    const key = `media/${postId}.${ext}`;
-
+    // ===== FILE TYPE LOGIC =====
+    let allowedTypes = [];
+    let folder = 'media';
+    let key = '';
     let presignedUrl = "";
-    try {
-      const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: ct });
-      presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
-    } catch (s3Err) {
-      console.error('[B2 Sign Fail]', s3Err.message);
-      return res.status(500).json({ error: 'B2 presign failed' });
-    }
+    
+    if (postType === 'story' || postType === 'store') {
+      // STORY: IMAGE ONLY + TEXT
+      allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+      folder = 'story';
 
-    // Save with caption & externalLink 
+      if (!contentType) { // Text only story, no file upload
+        key = '';
+        presignedUrl = '';
+      } else {
+        if (!allowedTypes.includes(contentType)) {
+          return res.status(400).json({ error: `Story only accepts images. Got: ${contentType}` });
+        }
+        let ext = fileExtension || 'jpg';
+        if (contentType.includes('png')) ext = 'png';
+        if (contentType.includes('webp')) ext = 'webp';
+        if (contentType.includes('gif')) ext = 'gif';
+        key = `${folder}/${postId}.${ext}`;
+        
+        const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: contentType });
+        presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
+      }
+
+    } else if (postType === 'reel') {
+      // REEL: VIDEO ONLY
+      allowedTypes = ['video/mp4', 'video/quicktime', 'video/mov'];
+      folder = 'media';
+      if (!allowedTypes.includes(contentType)) {
+        return res.status(400).json({ error: `Reel only accepts video. Got: ${contentType}` });
+      }
+      let ext = fileExtension || 'mp4';
+      if (contentType.includes('quicktime')) ext = 'mov';
+      key = `${folder}/${postId}.${ext}`;
+      
+      const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: contentType });
+      presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
+
+    } else {
+      // NOVEL: TEXT ONLY
+      key = '';
+      presignedUrl = '';
+    }
+    // ===== END FILE TYPE LOGIC =====
+
     await db.client.post.create({
       data: { 
         id: postId, 
         userId, 
         type: postType || 'reel', 
-        mediaUrl: key, 
+        mediaUrl: key, // will be '' for text
         thumbnailUrl: '', 
         status: 'PRE_UPLOAD', 
         b2Shard: getShardIndex(userId),
@@ -677,7 +696,9 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
       }
     });
 
+    console.log(`[INTENT OK] user:${userId} type:${postType} key:${key}`);
     res.json({ postId, uploadUrl: presignedUrl, objectKey: key });
+
   } catch (err) {
     console.error('[Intent Error]', err.message);
     res.status(500).json({ error: 'Intent initialization exception caught' });
@@ -690,70 +711,61 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
   const { userId } = req.user;
   const { postId, objectKey, title, content } = req.body;
 
+  console.log(`[CREATE START] user:${userId} postId:${postId} type:? key:${objectKey}`);
+
   const db = getDbShard(userId);
   const b2 = getB2Shard(userId);
 
   const post = await db.client.post.findUnique({ where: { id: postId } }).catch(() => null);
-  if (!post) return res.status(404).json({ error: 'Target tracking missing' });
+  if (!post) {
+    console.error(`[CREATE FAIL] Post not found in DB: ${postId}`);
+    return res.status(404).json({ error: 'Target tracking missing' });
+  }
+  
+  console.log(`[CREATE INFO] Found post. type:${post.type} user:${post.userId}`);
 
+  // 1. TEXT POSTS: Novel, Story, Store. No B2 needed
   if (post.type === 'novel' || post.type === 'story' || post.type === 'store') {
-    await db.client.post.update({
-      where: { id: postId },
-      data: { status: 'ACTIVE', title: title || '', content: content || '' }
-    });
-    return res.json({ message: 'Content compilation complete', postId });
+    console.log(`[CREATE TEXT] Activating text post: ${postId}`);
+    try {
+      await db.client.post.update({
+        where: { id: postId },
+        data: { status: 'ACTIVE', title: title || '', content: content || '' }
+      });
+      console.log(`[CREATE SUCCESS] Text post live: ${postId}`);
+      return res.json({ message: 'Content compilation complete', postId });
+    } catch (err) {
+      console.error(`[CREATE TEXT ERROR] ${postId}`, err.message);
+      return res.status(500).json({ error: 'Failed to activate text post' });
+    }
   }
 
-  const localVideoPath = path.join(__dirname, `temp_${postId}.mp4`);
-  const localThumbPath = path.join(__dirname, `thumb_${postId}.jpg`);
-  let thumbKey = '';
+  // 2. VIDEO POSTS: Reel. SKIPPING FFMPEG + DOWNLOAD FOR TESTING
+  console.log(`[CREATE REEL] Skipping B2 download and FFmpeg. Activating directly.`);
 
   try {
-    const getCmd = new GetObjectCommand({ Bucket: b2.bucket, Key: objectKey });
-    const s3Object = await b2.client.send(getCmd);
-
-    const writeStream = fs.createWriteStream(localVideoPath);
-    s3Object.Body.pipe(writeStream);
-    await new Promise((resolve, reject) => {
-      writeStream.on('finish', resolve);
-      writeStream.on('error', reject);
-    });
-
-    if (!fs.existsSync(localVideoPath) || fs.statSync(localVideoPath).size > 50 * 1024 * 1024) {
-      throw new Error('Size threshold check parameters completely violated');
-    }
-
-    await new Promise((resolve) => {
-      exec(`ffmpeg -ss 00:00:01 -i "${localVideoPath}" -vframes 1 -q:v 2 "${localThumbPath}" -y`, (err) => {
-        if (err || !fs.existsSync(localThumbPath)) {
-          console.warn('[FFmpeg Failed] Skipping thumb:', err?.message);
-        }
-        resolve();
-      });
-    });
-
-    if (fs.existsSync(localThumbPath)) {
-      thumbKey = `thumbs/${postId}.jpg`;
-      const thumbBuffer = fs.readFileSync(localThumbPath);
-      await b2.client.send(new PutObjectCommand({
-        Bucket: b2.bucket, Key: thumbKey, Body: thumbBuffer, ContentType: 'image/jpeg'
-      })).catch(() => {});
-    }
-
     await db.client.post.update({
       where: { id: postId },
-      data: { status: 'ACTIVE', mediaUrl: objectKey, thumbnailUrl: thumbKey }
+      data: { 
+        status: 'ACTIVE', 
+        mediaUrl: objectKey, // "media/xxx.mp4"
+        thumbnailUrl: '' // No thumbnail for now
+      }
     });
 
-    res.json({ message: 'Content compilation complete', postId });
+    console.log(`[CREATE SUCCESS] Reel live: ${postId} url:${objectKey}`);
+    return res.json({ message: 'Content compilation complete', postId });
+
   } catch (err) {
+    console.error(`[CREATE REEL ERROR] postId:${postId}`, err.message, err.stack);
+    
+    // Refund user and reject post
     await db.client.post.update({ where: { id: postId }, data: { status: 'REJECTED' } }).catch(() => {});
     await db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: 25 } } }).catch(() => {});
-    res.status(400).json({ error: 'Video compliance failed. Points recovered.' });
-  } finally {
-    if (fs.existsSync(localVideoPath)) fs.unlinkSync(localVideoPath);
-    if (fs.existsSync(localThumbPath)) fs.unlinkSync(localThumbPath);
+    
+    return res.status(400).json({ error: 'Video compliance failed. Points recovered.' });
   }
+  // No finally block needed because we removed temp files
 });
 
 // ========== LIVE TRACKING & FEED PORTS ==========
