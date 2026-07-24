@@ -627,7 +627,7 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
     }
     // ===== END TESTING LIMIT =====
 
-    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } });
+    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } } });
 
     const postId = crypto.randomBytes(8).toString('hex');
     const b2 = getB2Shard(userId);
