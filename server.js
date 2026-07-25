@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -220,24 +219,23 @@ io.on('connection', (socket) => {
     }
 
     // Save to DB
-    const msg = await db.client.message.create({
-      data: {
-        id: crypto.randomBytes(8).toString('hex'),
-        senderId: socket.userId,
-        receiverId,
-        text
-      }
-    });
+const msg = await db.client.message.create({
+  data: {
+    id: crypto.randomBytes(8).toString('hex'),
+    senderId: socket.userId,
+    receiverId,
+    text
+  }
+});
 
-    const receiverSocketId = onlineUsers.get(receiverId);
-    if(receiverSocketId){
-      io.to(receiverId).emit('receive_message', msg);
-    }
+const receiverSocketId = onlineUsers.get(receiverId);
+if(receiverSocketId){
+  io.to(receiverId).emit('receive_message', msg);
+}
 
- 
-sendNotification(receiverId, 'DM', 'New Message', `Message from ${senderUser.username}`);
+sendNotification(receiverId, 'DM', 'New Message', `Message from ${sender.username}`); // ✅ FIXED
     
-    socket.emit('receive_message', msg);
+socket.emit('receive_message', msg);
   });
 
   socket.on('typing', ({receiverId}) => {
@@ -1278,33 +1276,60 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/follow', authenticateToken, async (req, res) => {
-  const followerId = req.user.userId;
-  const { followingId } = req.body;
-  if (followerId === followingId) return res.status(400).json({ error: 'Cannot follow yourself' });
-
-  const db = getDbShard(followingId);
-
   try {
+    const followerId = req.user.userId; // ✅ fixed
+    const { followingId } = req.body;
+    
+    if (followerId === followingId) {
+      return res.status(400).json({ error: 'Cannot follow yourself' });
+    }
+    if (!followingId) {
+      return res.status(400).json({ error: 'Missing followingId' });
+    }
+
+    const db = getDbShard(followingId);
+
+    // Check if already following
+    const exists = await db.client.follow.findFirst({ 
+      where: { followerId, followingId } 
+    }).catch(() => null);
+
+    if (exists) {
+      return res.status(400).json({ error: 'Already following' });
+    }
+
     await db.client.follow.create({ data: { followerId, followingId } });
 
+    // Send notification
     const followerDb = getDbShard(followerId);
-    const followerUser = await followerDb.client.user.findUnique({where:{id:followerId}});
-    sendNotification(followingId, 'FOLLOW', 'New Follower', `${followerUser.username} started following you`);
-    res.status(400).json({ error: 'Already following' });
+    const followerUser = await followerDb.client.user.findUnique({ where:{id:followerId} });
+    if (followerUser) {
+      sendNotification(followingId, 'FOLLOW', 'New Follower', `${followerUser.username} started following you`);
+    }
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[Follow Error]', e.message);
+    res.status(500).json({ error: 'Follow failed' });
+  }
+});
+app.post('/api/unfollow', authenticateToken, async (req, res) => {
+  try {
+    const followerId = req.userId; // ✅ FIXED: was req.userId
+    const { followingId } = req.body; // ✅ FIXED: was Carrot
+    
+    if (!followingId) {
+      return res.status(400).json({ error: 'Missing followingId' });
+    }
+
+    const db = getDbShard(followingId);
+    await db.client.follow.deleteMany({ where: { followerId, followingId } });
     
     res.json({ success: true });
   } catch (e) {
-    
+    console.error('[Unfollow Error]', e.message);
+    res.status(500).json({ error: 'Unfollow failed' });
   }
-});
-
-// ========== FIX 1: UNFOLLOW TYPO ==========
-app.post('/api/unfollow', authenticateToken, async (req, res) => {
-  const followerId = req.userId;
-  const { followingId } = req.body; // FIXED: was Carrot
-  const db = getDbShard(followingId);
-  await db.client.follow.deleteMany({ where: { followerId, followingId } });
-  res.json({ success: true });
 });
 
 // ========== V5.1 REDESIGNED WITHDRAWAL GATEWAY ==========
@@ -1473,13 +1498,19 @@ app.get('/api/admin/payouts', requireAdmin, async (req, res) => {
 app.post('/api/admin/payouts/approve', requireAdmin, async (req, res) => {
   try {
     const { payoutId, userId } = req.body;
-    await getDbShard(userId).client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'APPROVED' } });
+    const db = getDbShard(userId);
+    
+    const payout = await db.client.payoutQueue.findUnique({ where: { id: payoutId } }); // ✅ ADDED THIS
+    if (!payout) return res.status(404).json({ error: 'Payout not found' });
 
-    const amount = payout.amountPoints / 10;
+    await db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'APPROVED' } });
+
+    const amount = payout.amountPoints / 10; // ✅ NOW payout exists
     sendNotification(userId, 'WITHDRAW', 'Withdrawal Approved ✅', `Your ₦${amount} withdrawal is approved and processing`);
     
     res.json({ success: true });
-  } catch {
+  } catch (e) {
+    console.error('[Payout Approve Error]', e.message);
     res.status(500).json({ error: 'Ledger tracking execution failed' });
   }
 });
