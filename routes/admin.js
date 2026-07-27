@@ -1,21 +1,44 @@
 const express = require('express');
 const router = express.Router();
+const jwt = require('jsonwebtoken');
 
-// Import from main server.js
-const { 
-  requireAdmin, 
-  getDbShard, 
+// ONLY import DB stuff from server
+const {
   prismaClients,
   findPostAcrossShards,
   sendNotification
-} = require('../server'); 
+} = require('../server');
+
+const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
+
+// ========== COPIED HELPERS TO KILL CIRCLE ==========
+function getDbShard(userId) {
+  const idx = parseInt(userId, 36) % 3;
+  if (idx === 1) return { client: prismaClients.db2 };
+  if (idx === 2) return { client: prismaClients.db3 };
+  return { client: prismaClients.db1 };
+}
+
+function requireAdmin(req, res, next) {
+  try {
+    const token = req.headers['authorization']?.split(' ')[1];
+    if (!token) return res.status(401).json({ error: 'Access token required' });
+    const user = jwt.verify(token, JWT_SECRET);
+    req.userId = user.userId;
+    const db = getDbShard(user.userId);
+    db.client.user.findUnique({ where: { id: user.userId } }).then(u => {
+      if (u?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+      next();
+    }).catch(() => res.status(500).json({ error: "DB error" }));
+  } catch { res.status(403).json({ error: 'Invalid token' }); }
+}
 
 // ========== 1. MASTER USER CONTROL: LIST, DELETE, MONETIZE ==========
 router.post('/users/manage', requireAdmin, async (req, res) => {
   try {
-    const adminId = req.user.userId;
+    const adminId = req.userId;
     const { action, userId, page = 1, limit = 50, search = '' } = req.body;
-    
+
     if (!action) return res.status(400).json({ error: 'Missing action field' });
     console.log(`[ADMIN ACTION] Admin:${adminId} Action:${action} Target:${userId || 'N/A'}`);
 
@@ -99,7 +122,7 @@ router.get('/deposits', requireAdmin, async (req, res) => {
     const deposits = await db.client.deposit.findMany({
       orderBy: { createdAt: 'desc' },
       take: 100,
-      include: { user: { select: { username: true, email: true } } } // FIXED: Added missing closing brace
+      include: { user: { select: { username: true, email: true } } } // FIXED: Added missing brace
     }).catch(() => []);
     all.push(...deposits);
   }
@@ -128,12 +151,13 @@ router.post('/posts/:id/reject', requireAdmin, async (req, res) => {
   const { id } = req.params;
   const target = await findPostAcrossShards(id);
   if (!target) return res.status(404).json({ error: 'Post not found across infrastructure shards' });
-  
+
   const refundAmount = target.post.type === 'reel' ? 25 : 10;
-  const userDb = getDbShard(target.post.userId); // FIXED: Cross-shard user resolution
+  const userDb = getDbShard(target.post.userId);
 
   await target.db.post.update({ where: { id }, data: { status: 'REJECTED' } });
-  await userDb.client.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } });
+  await userDb.client.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } }); // FIXED: Added missing brace
+  sendNotification(target.post.userId, 'POST', 'Post Rejected', `Your post was rejected. ${refundAmount} credits refunded`);
 
   res.json({ success: true, refunded: refundAmount });
 });
@@ -170,14 +194,13 @@ router.post('/payouts/reject', requireAdmin, async (req, res) => {
     const { payoutId, userId, reason } = req.body;
     const db = getDbShard(userId);
     const payout = await db.client.payoutQueue.findUnique({ where: { id: payoutId } });
-    
-    // FIXED: Added missing payout existence check
     if (!payout) return res.status(404).json({ error: 'Payout not found' });
 
     await db.client.$transaction([
-      db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } } }), // FIXED: Closing brace syntax error
+      db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } } }),
       db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'REJECTED', reason } })
     ]);
+    sendNotification(userId, 'WITHDRAW', 'Withdrawal Rejected ❌', `Reason: ${reason}`);
     res.json({ success: true });
   } catch (err) {
     console.error('[Payout Reject Error]', err.message);
@@ -211,6 +234,7 @@ router.post('/support/reply', requireAdmin, async (req, res) => {
       where: { id: ticketId },
       data: { reply: reply.trim(), status: 'RESOLVED' }
     });
+    sendNotification(userId, 'SUPPORT', 'Support Reply', `Admin replied: ${reply.slice(0, 50)}`);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to process admin support verification step' });
