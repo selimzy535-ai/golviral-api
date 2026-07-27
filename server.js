@@ -1404,23 +1404,6 @@ app.post('/api/wallet/withdraw/confirm', authenticateToken, async (req, res) => 
   }
 });
 
-// ========== SECURITY MATURING ADMIN QUEUE ROUTERS ==========
-function requireAdmin(req, res, next) {
-  authenticateToken(req, res, async () => {
-    const adminId = req.user?.userId;
-    if (!adminId) return res.status(401).json({ error: 'Token mapping error' });
-    const db = getDbShard(adminId);
-    const user = await db.client.user.findUnique({ where: { id: adminId } });
-    if (user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-    next();
-  });
-}
-app.post('/api/admin/verify-gate', async (req, res) => {
-  const { passToken } = req.body;
-  if (!(await internalVerifyPassToken(passToken))) return res.status(400).json({ error: 'Barrier verification failed' });
-  res.json({ pass: true });
-});
-
 // ========== V5.1 NEW SUPPORT TICKETING MATRIX ==========
 app.post('/api/support/send', authenticateToken, async (req, res) => {
   try {
