@@ -15,6 +15,7 @@ const crypto = require('crypto');
 const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const adminRoutes = require('./routes/admin'); 
 const webpush = require('web-push'); // npm i web-push
 const multer = require('multer'); // npm i multer
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
@@ -275,7 +276,7 @@ app.use(morgan('combined'));
 
 // ========== GLOBAL MEMORY BUFFER ==========
 let interactionBuffer = [];
-
+app.use('/api/admin', adminRoutes); 
 // ========== EMAIL ENGINE ==========
 async function sendEmail(to, subject, html) {
   if (!to) return console.error('[Email Engine Error] Recipient field undefined.');
@@ -1429,88 +1430,10 @@ function requireAdmin(req, res, next) {
     next();
   });
 }
-
-app.get('/api/admin/posts/pending', requireAdmin, async (req, res) => {
-  const all = [];
-  for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
-    const posts = await db.post.findMany({ where: { status: 'PRE_UPLOAD' }, include: { user: true } }).catch(() => []);
-    all.push(...posts);
-  }
-  res.json(all);
-});
-
-app.post('/api/admin/posts/:id/approve', requireAdmin, async (req, res) => {
-  const { id } = req.params;
-  const target = await findPostAcrossShards(id);
-  if (!target) return res.status(404).json({ error: 'Post not found across infrastructure shards' });
-  await target.db.post.update({ where: { id }, data: { status: 'ACTIVE' } });
-  res.json({ success: true });
-});
-
-app.post('/api/admin/posts/:id/reject', requireAdmin, async (req, res) => {
-  const { id } = req.params;
-  const target = await findPostAcrossShards(id);
-  if (!target) return res.status(404).json({ error: 'Post not found across infrastructure shards' });
-  
-  const refundAmount = target.post.type === 'reel' ? 25 : 10;
-  
-  await target.db.$transaction([
-    target.db.post.update({ where: { id }, data: { status: 'REJECTED' } }),
-    target.db.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } }) 
-  ]);
-  res.json({ success: true, refunded: refundAmount });
-});
-
 app.post('/api/admin/verify-gate', async (req, res) => {
   const { passToken } = req.body;
   if (!(await internalVerifyPassToken(passToken))) return res.status(400).json({ error: 'Barrier verification failed' });
   res.json({ pass: true });
-});
-
-app.get('/api/admin/payouts', requireAdmin, async (req, res) => {
-  const all = [];
-  for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
-    await db.payoutQueue.findMany({ where: { status: 'PENDING' } })
-      .then(r => all.push(...r))
-      .catch(() => {});
-  }
-  res.json(all);
-});
-
-app.post('/api/admin/payouts/approve', requireAdmin, async (req, res) => {
-  try {
-    const { payoutId, userId } = req.body;
-    const db = getDbShard(userId);
-    
-    const payout = await db.client.payoutQueue.findUnique({ where: { id: payoutId } }); // ✅ ADDED THIS
-    if (!payout) return res.status(404).json({ error: 'Payout not found' });
-
-    await db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'APPROVED' } });
-
-    const amount = payout.amountPoints / 10; // ✅ NOW payout exists
-    sendNotification(userId, 'WITHDRAW', 'Withdrawal Approved ✅', `Your ₦${amount} withdrawal is approved and processing`);
-    
-    res.json({ success: true });
-  } catch (e) {
-    console.error('[Payout Approve Error]', e.message);
-    res.status(500).json({ error: 'Ledger tracking execution failed' });
-  }
-});
-
-app.post('/api/admin/payouts/reject', requireAdmin, async (req, res) => {
-  try {
-    const { payoutId, userId, reason } = req.body;
-    const db = getDbShard(userId);
-    const payout = await db.client.payoutQueue.findUnique({ where: { id: payoutId } });
-    
-    await db.client.$transaction([
-      db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } } }),
-      db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'REJECTED', reason } })
-    ]);
-    res.json({ success: true });
-  } catch {
-    res.status(500).json({ error: 'Admin reversion system block handled execution fallback' });
-  }
 });
 
 // ========== V5.1 NEW SUPPORT TICKETING MATRIX ==========
@@ -1555,40 +1478,6 @@ app.get('/api/support/my', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Could not fetch support timeline logs' });
   }
 });
-
-app.get('/api/admin/support', requireAdmin, async (req, res) => {
-  try {
-    const all = [];
-    for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
-      const tickets = await db.supportTicket.findMany({
-        where: { status: 'PENDING' },
-        orderBy: { createdAt: 'desc' }
-      }).catch(() => []);
-      all.push(...tickets);
-    }
-    res.json(all);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to retrieve active ticket streams' });
-  }
-});
-
-app.post('/api/admin/support/reply', requireAdmin, async (req, res) => {
-  try {
-    const { ticketId, userId, reply } = req.body;
-    if (!ticketId || !userId || !reply) return res.status(400).json({ error: 'Missing ticket transaction credentials' });
-
-    const db = getDbShard(userId);
-    await db.client.supportTicket.update({
-      where: { id: ticketId },
-      data: { reply: reply.trim(), status: 'RESOLVED' }
-    });
-
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to process admin support verification step' });
-  }
-});
-
 // ========== SOCKET.IO & V4.6 FALLBACK MESSAGING ==========
 app.post('/api/message/send', authenticateToken, requireDMUnlock, async (req,res)=>{
   const {receiverId, text} = req.body;
@@ -1756,6 +1645,13 @@ app.post('/api/notifications/read/:id', authenticateToken, async (req, res) => {
   res.json({success: true});
 });
 
+module.exports = { 
+  requireAdmin,        // export the function
+  getDbShard,          // export the function  
+  prismaClients,       // export the 3 DBs
+  findPostAcrossShards,// export the function
+  sendNotification     // export the function
+};
 // ========== CHORE SYSTEM SCHEDULER CRON SERVICES ==========
 
 // 1. Cron Buffer Ingestion Engine (Every 10 seconds)
