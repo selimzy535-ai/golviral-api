@@ -99,7 +99,7 @@ router.get('/deposits', requireAdmin, async (req, res) => {
     const deposits = await db.client.deposit.findMany({
       orderBy: { createdAt: 'desc' },
       take: 100,
-      include: { user: { select: { username: true, email: true } }
+      include: { user: { select: { username: true, email: true } } } // FIXED: Added missing closing brace
     }).catch(() => []);
     all.push(...deposits);
   }
@@ -128,11 +128,13 @@ router.post('/posts/:id/reject', requireAdmin, async (req, res) => {
   const { id } = req.params;
   const target = await findPostAcrossShards(id);
   if (!target) return res.status(404).json({ error: 'Post not found across infrastructure shards' });
+  
   const refundAmount = target.post.type === 'reel' ? 25 : 10;
-  await target.db.$transaction([
-    target.db.post.update({ where: { id }, data: { status: 'REJECTED' } }),
-    target.db.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } }) 
-  ]);
+  const userDb = getDbShard(target.post.userId); // FIXED: Cross-shard user resolution
+
+  await target.db.post.update({ where: { id }, data: { status: 'REJECTED' } });
+  await userDb.client.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } });
+
   res.json({ success: true, refunded: refundAmount });
 });
 
@@ -168,12 +170,17 @@ router.post('/payouts/reject', requireAdmin, async (req, res) => {
     const { payoutId, userId, reason } = req.body;
     const db = getDbShard(userId);
     const payout = await db.client.payoutQueue.findUnique({ where: { id: payoutId } });
+    
+    // FIXED: Added missing payout existence check
+    if (!payout) return res.status(404).json({ error: 'Payout not found' });
+
     await db.client.$transaction([
-      db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } }),
+      db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } } }), // FIXED: Closing brace syntax error
       db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'REJECTED', reason } })
     ]);
     res.json({ success: true });
-  } catch {
+  } catch (err) {
+    console.error('[Payout Reject Error]', err.message);
     res.status(500).json({ error: 'Admin reversion system block handled execution fallback' });
   }
 });
