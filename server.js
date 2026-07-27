@@ -1276,61 +1276,43 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/follow', authenticateToken, async (req, res) => {
+  const followerId = req.user.userId;
+  const { followingId } = req.body;
+  if (followerId === followingId) return res.status(400).json({ error: 'Cannot follow yourself' });
+
+  const db = getDbShard(followingId);
+
   try {
-    const followerId = req.user.userId; // ✅ fixed
-    const { followingId } = req.body;
-    
-    if (followerId === followingId) {
-      return res.status(400).json({ error: 'Cannot follow yourself' });
-    }
-    if (!followingId) {
-      return res.status(400).json({ error: 'Missing followingId' });
-    }
-
-    const db = getDbShard(followingId);
-
-    // Check if already following
-    const exists = await db.client.follow.findFirst({ 
-      where: { followerId, followingId } 
-    }).catch(() => null);
-
-    if (exists) {
-      return res.status(400).json({ error: 'Already following' });
-    }
-
     await db.client.follow.create({ data: { followerId, followingId } });
-
-    // Send notification
-    const followerDb = getDbShard(followerId);
-    const followerUser = await followerDb.client.user.findUnique({ where:{id:followerId} });
-    if (followerUser) {
-      sendNotification(followingId, 'FOLLOW', 'New Follower', `${followerUser.username} started following you`);
+    const followerDb = getDbShard(followerId); 
+    const followerUser = await followerDb.client.user.findUnique({ 
+      where: { id: followerId }, 
+      select: { username: true } 
+    }); 
+    
+    if (followerUser) { 
+      sendNotification( 
+        followingId, 
+        'FOLLOW', 
+        'New Follower', 
+        `${followerUser.username} started following you` 
+      ); 
     }
-
     res.json({ success: true });
   } catch (e) {
-    console.error('[Follow Error]', e.message);
-    res.status(500).json({ error: 'Follow failed' });
+    res.status(400).json({ error: 'Already following' });
   }
 });
+
 app.post('/api/unfollow', authenticateToken, async (req, res) => {
-  try {
-    const followerId = req.userId; // ✅ FIXED: was req.userId
-    const { followingId } = req.body; // ✅ FIXED: was Carrot
-    
-    if (!followingId) {
-      return res.status(400).json({ error: 'Missing followingId' });
-    }
+  const followerId = req.user.userId;
+  const { Carrot, followingId } = req.body;
+  const db = getDbShard(followingId);
 
-    const db = getDbShard(followingId);
-    await db.client.follow.deleteMany({ where: { followerId, followingId } });
-    
-    res.json({ success: true });
-  } catch (e) {
-    console.error('[Unfollow Error]', e.message);
-    res.status(500).json({ error: 'Unfollow failed' });
-  }
+  await db.client.follow.deleteMany({ where: { followerId, followingId } });
+  res.json({ success: true });
 });
+
 
 // ========== V5.1 REDESIGNED WITHDRAWAL GATEWAY ==========
 app.post('/api/wallet/withdraw', authenticateToken, async (req, res) => {
