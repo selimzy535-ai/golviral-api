@@ -276,7 +276,6 @@ app.use(morgan('combined'));
 
 // ========== GLOBAL MEMORY BUFFER ==========
 let interactionBuffer = [];
-app.use('/api/admin', adminRoutes); 
 // ========== EMAIL ENGINE ==========
 async function sendEmail(to, subject, html) {
   if (!to) return console.error('[Email Engine Error] Recipient field undefined.');
@@ -1146,20 +1145,6 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
   }
 });
 
-// ========== ADMIN PORTS ==========
-app.get('/api/admin/deposits', requireAdmin, async (req, res) => {
-  const all = [];
-  for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
-    const deposits = await db.deposit.findMany({
-      orderBy: { createdAt: 'desc' },
-      take: 100,
-      include: { user: { select: { username: true, email: true } } }
-    }).catch(() => []);
-    all.push(...deposits);
-  }
-  res.json(all);
-});
-
 // ========== MEDIA SIGNING PORT ==========
 const bucketMap = {
  0: { client: b2Clients.b2a, bucket: b2Config.a.bucket },
@@ -1645,13 +1630,13 @@ app.post('/api/notifications/read/:id', authenticateToken, async (req, res) => {
   res.json({success: true});
 });
 
-module.exports = { 
-  requireAdmin,        // export the function
-  getDbShard,          // export the function  
-  prismaClients,       // export the 3 DBs
-  findPostAcrossShards,// export the function
-  sendNotification     // export the function
+// 3. EXPORT FOR ADMIN.JS TO USE
+module.exports = {
+  prismaClients,
+  findPostAcrossShards,
+  sendNotification
 };
+app.use('/api/admin', adminRoutes); 
 // ========== CHORE SYSTEM SCHEDULER CRON SERVICES ==========
 
 // 1. Cron Buffer Ingestion Engine (Every 10 seconds)
