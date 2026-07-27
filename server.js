@@ -1629,14 +1629,13 @@ app.post('/api/notifications/read/:id', authenticateToken, async (req, res) => {
   await db.client.notification.update({ where: { id: req.params.id }, data: { isRead: true } }).catch(()=>{});
   res.json({success: true});
 });
-
+app.use('/api/admin', adminRoutes); 
 // 3. EXPORT FOR ADMIN.JS TO USE
 module.exports = {
   prismaClients,
   findPostAcrossShards,
   sendNotification
 };
-app.use('/api/admin', adminRoutes); 
 // ========== CHORE SYSTEM SCHEDULER CRON SERVICES ==========
 
 // 1. Cron Buffer Ingestion Engine (Every 10 seconds)
