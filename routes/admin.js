@@ -10,6 +10,7 @@ const {
 } = require('../server');
 
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
+const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY; // ADD THIS TO RENDER ENV
 
 // ========== COPIED HELPERS TO KILL CIRCLE ==========
 function getDbShard(userId) {
@@ -23,13 +24,24 @@ function requireAdmin(req, res, next) {
   try {
     const token = req.headers['authorization']?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'Access token required' });
+
     const user = jwt.verify(token, JWT_SECRET);
     req.userId = user.userId;
+
+    // 1. SECRET KEY BYPASS - NO DB CHECK NEEDED
+    const adminKey = req.headers['x-admin-key'];
+    if (ADMIN_SECRET && adminKey === ADMIN_SECRET) {
+      console.log(`[ADMIN ACCESS] Secret Key used by ${user.userId}`);
+      return next(); // Instant access
+    }
+
+    // 2. FALLBACK: DB ROLE CHECK for backup admins
     const db = getDbShard(user.userId);
     db.client.user.findUnique({ where: { id: user.userId } }).then(u => {
       if (u?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
       next();
     }).catch(() => res.status(500).json({ error: "DB error" }));
+
   } catch { res.status(403).json({ error: 'Invalid token' }); }
 }
 
@@ -122,7 +134,7 @@ router.get('/deposits', requireAdmin, async (req, res) => {
     const deposits = await db.client.deposit.findMany({
       orderBy: { createdAt: 'desc' },
       take: 100,
-      include: { user: { select: { username: true, email: true } } } // FIXED: Added missing brace
+      include: { user: { select: { username: true, email: true } } }
     }).catch(() => []);
     all.push(...deposits);
   }
@@ -156,7 +168,7 @@ router.post('/posts/:id/reject', requireAdmin, async (req, res) => {
   const userDb = getDbShard(target.post.userId);
 
   await target.db.post.update({ where: { id }, data: { status: 'REJECTED' } });
-  await userDb.client.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } }); // FIXED: Added missing brace
+  await userDb.client.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } });
   sendNotification(target.post.userId, 'POST', 'Post Rejected', `Your post was rejected. ${refundAmount} credits refunded`);
 
   res.json({ success: true, refunded: refundAmount });
@@ -197,7 +209,7 @@ router.post('/payouts/reject', requireAdmin, async (req, res) => {
     if (!payout) return res.status(404).json({ error: 'Payout not found' });
 
     await db.client.$transaction([
-      db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } } }),
+      db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } } }), // FIXED: Closing brace added
       db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'REJECTED', reason } })
     ]);
     sendNotification(userId, 'WITHDRAW', 'Withdrawal Rejected ❌', `Reason: ${reason}`);
