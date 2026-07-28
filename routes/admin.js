@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const { PrismaClient } = require('@prisma/client'); // ADDED
+const { PrismaClient } = require('@prisma/client');
 
 // ========== KILL CIRCULAR DEPENDENCY: MAKE OWN DB ==========
 const dbUrls = [
@@ -10,10 +10,10 @@ const dbUrls = [
   process.env.DATABASEURL3
 ];
 
-const prismaClients = { // ADDED: own clients
-  db1: new PrismaClient({ datasources: { db: { url: dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db1" } }),
-  db2: new PrismaClient({ datasources: { db: { url: dbUrls[1] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db2" } }),
-  db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db3" } }),
+const prismaClients = {
+  db1: new PrismaClient({ datasources: { db: { url: dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db1" } } }),
+  db2: new PrismaClient({ datasources: { db: { url: dbUrls[1] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db2" } } }),
+  db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db3" } } }),
 };
 
 Object.entries(prismaClients).forEach(([name, client]) => {
@@ -21,20 +21,21 @@ Object.entries(prismaClients).forEach(([name, client]) => {
 });
 
 // ========== ONLY IMPORT WHAT WE NEED FROM SERVER ==========
-const { sendNotification } = require('../server'); // ONLY this
+const { sendNotification } = require('../server');
 
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
-const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY; // ADD THIS TO RENDER ENV
+const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY;
 
 // ========== COPIED HELPERS TO KILL CIRCLE ==========
-function findPostAcrossShards(id) { // ADDED: own copy
-  const dbs = [ {client: prismaClients.db1}, {client: prismaClients.db2}, {client: prismaClients.db3} ];
-  return (async () => {
-    for (const db of dbs) {
-      try { const post = await db.client.post.findUnique({ where: { id } }); if (post) return { post, db: db.client }; }
-      catch (err) {}
-    } return null;
-  })();
+async function findPostAcrossShards(id) {
+  const dbs = [{ client: prismaClients.db1 }, { client: prismaClients.db2 }, { client: prismaClients.db3 }];
+  for (const db of dbs) {
+    try {
+      const post = await db.client.post.findUnique({ where: { id } });
+      if (post) return { post, db: db.client };
+    } catch (err) {}
+  }
+  return null;
 }
 
 function getDbShard(userId) {
@@ -58,10 +59,12 @@ function requireAdmin(req, res, next) {
     req.userId = user.userId;
     const db = getDbShard(user.userId);
     return db.client.user.findUnique({ where: { id: user.userId } }).then(u => {
-      if (u?.role!== 'admin') return res.status(403).json({ error: 'Admin only' });
+      if (u?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
       next();
     }).catch(() => res.status(500).json({ error: "DB error" }));
-  } catch { res.status(403).json({ error: 'Invalid credentials' }); }
+  } catch {
+    res.status(403).json({ error: 'Invalid credentials' });
+  }
 }
 
 // ========== 1. MASTER USER CONTROL: LIST, DELETE, MONETIZE ==========
@@ -73,7 +76,7 @@ router.post('/users/manage', requireAdmin, async (req, res) => {
     if (!action) return res.status(400).json({ error: 'Missing action field' });
     console.log(`[ADMIN ACTION] Admin:${adminId} Action:${action} Target:${userId || 'N/A'}`);
 
-    const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+    const dbs = [{ client: prismaClients.db1 }, { client: prismaClients.db2 }, { client: prismaClients.db3 }];
 
     if (action === 'list') {
       const allUsers = [];
@@ -150,7 +153,7 @@ router.post('/users/manage', requireAdmin, async (req, res) => {
 router.get('/deposits', requireAdmin, async (req, res) => {
   const all = [];
   for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
-    const deposits = await db.client.deposit.findMany({
+    const deposits = await db.deposit.findMany({
       orderBy: { createdAt: 'desc' },
       take: 100,
       include: { user: { select: { username: true, email: true } } }
@@ -164,7 +167,7 @@ router.get('/deposits', requireAdmin, async (req, res) => {
 router.get('/posts/pending', requireAdmin, async (req, res) => {
   const all = [];
   for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
-    const posts = await db.client.post.findMany({ where: { status: 'PRE_UPLOAD' }, include: { user: true } }).catch(() => []);
+    const posts = await db.post.findMany({ where: { status: 'PRE_UPLOAD' }, include: { user: true } }).catch(() => []);
     all.push(...posts);
   }
   res.json(all);
@@ -197,7 +200,7 @@ router.post('/posts/:id/reject', requireAdmin, async (req, res) => {
 router.get('/payouts', requireAdmin, async (req, res) => {
   const all = [];
   for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
-    await db.client.payoutQueue.findMany({ where: { status: 'PENDING' } })
+    await db.payoutQueue.findMany({ where: { status: 'PENDING' } })
       .then(r => all.push(...r)).catch(() => {});
   }
   res.json(all);
@@ -228,7 +231,7 @@ router.post('/payouts/reject', requireAdmin, async (req, res) => {
     if (!payout) return res.status(404).json({ error: 'Payout not found' });
 
     await db.client.$transaction([
-      db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } } }), // FIXED: Closing brace added
+      db.client.user.update({ where: { id: userId }, data: { cashBalance: { increment: payout.amountPoints } } }),
       db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'REJECTED', reason } })
     ]);
     sendNotification(userId, 'WITHDRAW', 'Withdrawal Rejected ❌', `Reason: ${reason}`);
@@ -244,7 +247,7 @@ router.get('/support', requireAdmin, async (req, res) => {
   try {
     const all = [];
     for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
-      const tickets = await db.client.supportTicket.findMany({
+      const tickets = await db.supportTicket.findMany({
         where: { status: 'PENDING' },
         orderBy: { createdAt: 'desc' }
       }).catch(() => []);
