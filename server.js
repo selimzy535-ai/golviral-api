@@ -1,4 +1,8 @@
+
+// ========== 1. ALL IMPORTS & REQUIRES ==========
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
@@ -18,19 +22,23 @@ const path = require('path');
 const adminRoutes = require('./routes/admin'); 
 const webpush = require('web-push'); // npm i web-push
 const multer = require('multer'); // npm i multer
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
-// ========== ENV CONFIG ==========
+
+// ========== 2. ENV CONFIG & CONSTANTS ==========
 const PORT = process.env.PORT || 10000;
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
 const APP_BASE_URL = process.env.APPBASEURL || 'https://selimzy535-ai.github.io/golviral-frontend';
 
+// CORS - Allow GitHub Pages + Custom Domain
+const allowedOrigins = [
+  'https://selimzy535-ai.github.io',
+  'https://golviral.com'
+];
+
 console.log(`[INIT] GolViral v5.1 Hardened Core Stack Engine...`);
 console.log(`[CONFIG] APP_BASE_URL: ${APP_BASE_URL}`);
 
-// ========== INIT & SECURITY OVERRIDES ==========
+// ========== 3. APP & SERVER INITIALIZATION ==========
 const app = express();
-const http = require('http');
-const { Server } = require('socket.io');
 const server = http.createServer(app);
 
 const io = new Server(server, {
@@ -40,10 +48,31 @@ const io = new Server(server, {
   }
 });
 
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB// ========== 4. MIDDLEWARE CONFIGURATION ==========
+// Body parser - 50MB for video uploads
+app.use(express.json({ limit: '50mb' }));
+
+app.use(cors({ 
+  origin: allowedOrigins, // use array directly, faster
+  credentials: false, // must be false with specific origins
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-key'] // ADDED
+}));
+
+app.options('*', cors()); // iPhone preflight fix
+
+app.use(helmet());
+app.use(morgan('combined'));
+
+// MOUNT ADMIN ROUTES HERE - NOT AT THE BOTTOM
+app.use('/api/admin', adminRoutes);
+
+// ========== 5. GLOBAL MEMORY & STATE MAPS ==========
 // Map userId to socketId for DM routing
 const onlineUsers = new Map();
+let interactionBuffer = [];
 
-// ========== 3x SHARDING PRISMA CLIENTS ==========
+// ========== 6. 3x SHARDING PRISMA CLIENTS ==========
 const dbUrls = [
   process.env.DATABASEURL1,
   process.env.DATABASEURL2,
@@ -100,7 +129,7 @@ webpush.setVapidDetails(
   process.env.VAPID_PRIVATE_KEY || 'YourPrivateKeyHere'
 );
 
-// ========== SHARDING ROUTING HELPERS ==========
+// ========== 7. HELPER FUNCTIONS & ROUTING HELPERS ==========
 function getShardIndex(id) {
   if (!id) return 0;
   return parseInt(id, 36) % 3;
@@ -185,7 +214,38 @@ async function isUserMonetized(userId) {
   return false;
 }
 
-// ========== SOCKET HANDSHAKE & EVENTS ==========
+// ========== EMAIL ENGINE ==========
+async function sendEmail(to, subject, html) {
+  if (!to) return console.error('[Email Engine Error] Recipient field undefined.');
+  const mailOptions = { from: process.env.BREVO_USER || 'noreply@golviral.com', to, subject, html };
+  
+  try {
+    if (!process.env.BREVO_USER || !process.env.BREVO_PASS) {
+      throw new Error('Primary Brevo configurations are missing');
+    }
+    const brevo = nodemailer.createTransport({
+      host: 'smtp-relay.brevo.com',
+      port: 587,
+      auth: { user: process.env.BREVO_USER, pass: process.env.BREVO_PASS }
+    });
+    await brevo.sendMail(mailOptions);
+    console.log(`[Email Dispatched] Primary sent cleanly to ${to}`);
+  } catch (err) {
+    console.error(`[Email Warning] Primary failed, executing Resend Matrix...`);
+    if (!process.env.RESENDAPIKEY) {
+      return console.error('[Email Catastrophe] Resend credentials not defined.');
+    }
+    await axios.post('https://api.resend.com/emails', {
+      from: process.env.BREVO_USER || 'noreply@golviral.com', to: [to], subject, html
+    }, { 
+      headers: { 'Authorization': `Bearer ${process.env.RESENDAPIKEY}`, 'Content-Type': 'application/json' } 
+    })
+    .then(() => console.log(`[Email Dispatched] Fallback recovered for ${to}`))
+    .catch((fallbackErr) => console.error(`[Email Failure] Total collapse:`, fallbackErr.message));
+  }
+}
+
+// ========== 8. SOCKET HANDSHAKE & EVENTS ==========
 io.use(async (socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) return next(new Error("Unauthorized"));
@@ -220,23 +280,23 @@ io.on('connection', (socket) => {
     }
 
     // Save to DB
-const msg = await db.client.message.create({
-  data: {
-    id: crypto.randomBytes(8).toString('hex'),
-    senderId: socket.userId,
-    receiverId,
-    text
-  }
-});
+    const msg = await db.client.message.create({
+      data: {
+        id: crypto.randomBytes(8).toString('hex'),
+        senderId: socket.userId,
+        receiverId,
+        text
+      }
+    });
 
-const receiverSocketId = onlineUsers.get(receiverId);
-if(receiverSocketId){
-  io.to(receiverId).emit('receive_message', msg);
-}
+    const receiverSocketId = onlineUsers.get(receiverId);
+    if(receiverSocketId){
+      io.to(receiverId).emit('receive_message', msg);
+    }
 
-sendNotification(receiverId, 'DM', 'New Message', `Message from ${sender.username}`); // ✅ FIXED
+    sendNotification(receiverId, 'DM', 'New Message', `Message from ${sender.username}`); // ✅ FIXED
     
-socket.emit('receive_message', msg);
+    socket.emit('receive_message', msg);
   });
 
   socket.on('typing', ({receiverId}) => {
@@ -248,64 +308,6 @@ socket.emit('receive_message', msg);
     console.log(`[WS] User disconnected: ${socket.userId}`);
   });
 });
-
-// Body parser - 50MB for video uploads
-app.use(express.json({ limit: '50mb' }));
-
-// CORS - Allow GitHub Pages + Custom Domain
-const allowedOrigins = [
-  'https://selimzy535-ai.github.io',
-  'https://golviral.com'
-];
-
-app.use(cors({ 
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('CORS blocked: ' + origin));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-app.use(helmet());
-app.use(morgan('combined'));
-
-// ========== GLOBAL MEMORY BUFFER ==========
-let interactionBuffer = [];
-// ========== EMAIL ENGINE ==========
-async function sendEmail(to, subject, html) {
-  if (!to) return console.error('[Email Engine Error] Recipient field undefined.');
-  const mailOptions = { from: process.env.BREVO_USER || 'noreply@golviral.com', to, subject, html };
-  
-  try {
-    if (!process.env.BREVO_USER || !process.env.BREVO_PASS) {
-      throw new Error('Primary Brevo configurations are missing');
-    }
-    const brevo = nodemailer.createTransport({
-      host: 'smtp-relay.brevo.com',
-      port: 587,
-      auth: { user: process.env.BREVO_USER, pass: process.env.BREVO_PASS }
-    });
-    await brevo.sendMail(mailOptions);
-    console.log(`[Email Dispatched] Primary sent cleanly to ${to}`);
-  } catch (err) {
-    console.error(`[Email Warning] Primary failed, executing Resend Matrix...`);
-    if (!process.env.RESENDAPIKEY) {
-      return console.error('[Email Catastrophe] Resend credentials not defined.');
-    }
-    await axios.post('https://api.resend.com/emails', {
-      from: process.env.BREVO_USER || 'noreply@golviral.com', to: [to], subject, html
-    }, { 
-      headers: { 'Authorization': `Bearer ${process.env.RESENDAPIKEY}`, 'Content-Type': 'application/json' } 
-    })
-    .then(() => console.log(`[Email Dispatched] Fallback recovered for ${to}`))
-    .catch((fallbackErr) => console.error(`[Email Failure] Total collapse:`, fallbackErr.message));
-  }
-}
 
 // ========== MATH BOT CHALLENGE ENGINE ==========
 app.post('/api/bot-challenge', async (req, res) => {
@@ -1623,7 +1625,6 @@ app.post('/api/notifications/read/:id', authenticateToken, async (req, res) => {
   await db.client.notification.update({ where: { id: req.params.id }, data: { isRead: true } }).catch(()=>{});
   res.json({success: true});
 });
-app.use('/api/admin', adminRoutes); 
 // 3. EXPORT FOR ADMIN.JS TO USE
 module.exports = {
   prismaClients,
