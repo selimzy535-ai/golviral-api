@@ -1,18 +1,42 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const { PrismaClient } = require('@prisma/client'); // ADDED
 
-// ONLY import DB stuff from server
-const {
-  prismaClients,
-  findPostAcrossShards,
-  sendNotification
-} = require('../server');
+// ========== KILL CIRCULAR DEPENDENCY: MAKE OWN DB ==========
+const dbUrls = [
+  process.env.DATABASEURL1,
+  process.env.DATABASEURL2,
+  process.env.DATABASEURL3
+];
+
+const prismaClients = { // ADDED: own clients
+  db1: new PrismaClient({ datasources: { db: { url: dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db1" } }),
+  db2: new PrismaClient({ datasources: { db: { url: dbUrls[1] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db2" } }),
+  db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db3" } }),
+};
+
+Object.entries(prismaClients).forEach(([name, client]) => {
+  client.$connect().catch((err) => console.error(`[Admin Prisma] Shard ${name} offline.`, err.message));
+});
+
+// ========== ONLY IMPORT WHAT WE NEED FROM SERVER ==========
+const { sendNotification } = require('../server'); // ONLY this
 
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
 const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY; // ADD THIS TO RENDER ENV
 
 // ========== COPIED HELPERS TO KILL CIRCLE ==========
+function findPostAcrossShards(id) { // ADDED: own copy
+  const dbs = [ {client: prismaClients.db1}, {client: prismaClients.db2}, {client: prismaClients.db3} ];
+  return (async () => {
+    for (const db of dbs) {
+      try { const post = await db.client.post.findUnique({ where: { id } }); if (post) return { post, db: db.client }; }
+      catch (err) {}
+    } return null;
+  })();
+}
+
 function getDbShard(userId) {
   const idx = parseInt(userId, 36) % 3;
   if (idx === 1) return { client: prismaClients.db2 };
@@ -22,29 +46,24 @@ function getDbShard(userId) {
 
 function requireAdmin(req, res, next) {
   try {
-    // 1. SECRET KEY ONLY - NO JWT NEEDED
     const adminKey = req.headers['x-admin-key'];
     if (ADMIN_SECRET && adminKey === ADMIN_SECRET) {
       console.log(`[ADMIN ACCESS] Secret Key used`);
-      req.userId = 'admin-secret-key'; // fake userId so routes don't crash
-      return next(); // Instant access
+      req.userId = 'admin-secret-key';
+      return next();
     }
-
-    // 2. OPTIONAL: Still allow login + role check as backup
     const token = req.headers['authorization']?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'Admin Secret Key or Login required' });
-
     const user = jwt.verify(token, JWT_SECRET);
     req.userId = user.userId;
-
     const db = getDbShard(user.userId);
     return db.client.user.findUnique({ where: { id: user.userId } }).then(u => {
       if (u?.role!== 'admin') return res.status(403).json({ error: 'Admin only' });
       next();
     }).catch(() => res.status(500).json({ error: "DB error" }));
-
   } catch { res.status(403).json({ error: 'Invalid credentials' }); }
 }
+
 // ========== 1. MASTER USER CONTROL: LIST, DELETE, MONETIZE ==========
 router.post('/users/manage', requireAdmin, async (req, res) => {
   try {
