@@ -22,29 +22,29 @@ function getDbShard(userId) {
 
 function requireAdmin(req, res, next) {
   try {
+    // 1. SECRET KEY ONLY - NO JWT NEEDED
+    const adminKey = req.headers['x-admin-key'];
+    if (ADMIN_SECRET && adminKey === ADMIN_SECRET) {
+      console.log(`[ADMIN ACCESS] Secret Key used`);
+      req.userId = 'admin-secret-key'; // fake userId so routes don't crash
+      return next(); // Instant access
+    }
+
+    // 2. OPTIONAL: Still allow login + role check as backup
     const token = req.headers['authorization']?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Access token required' });
+    if (!token) return res.status(401).json({ error: 'Admin Secret Key or Login required' });
 
     const user = jwt.verify(token, JWT_SECRET);
     req.userId = user.userId;
 
-    // 1. SECRET KEY BYPASS - NO DB CHECK NEEDED
-    const adminKey = req.headers['x-admin-key'];
-    if (ADMIN_SECRET && adminKey === ADMIN_SECRET) {
-      console.log(`[ADMIN ACCESS] Secret Key used by ${user.userId}`);
-      return next(); // Instant access
-    }
-
-    // 2. FALLBACK: DB ROLE CHECK for backup admins
     const db = getDbShard(user.userId);
-    db.client.user.findUnique({ where: { id: user.userId } }).then(u => {
-      if (u?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    return db.client.user.findUnique({ where: { id: user.userId } }).then(u => {
+      if (u?.role!== 'admin') return res.status(403).json({ error: 'Admin only' });
       next();
     }).catch(() => res.status(500).json({ error: "DB error" }));
 
-  } catch { res.status(403).json({ error: 'Invalid token' }); }
+  } catch { res.status(403).json({ error: 'Invalid credentials' }); }
 }
-
 // ========== 1. MASTER USER CONTROL: LIST, DELETE, MONETIZE ==========
 router.post('/users/manage', requireAdmin, async (req, res) => {
   try {
