@@ -1446,6 +1446,17 @@ app.get('/api/support/my', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Could not fetch support timeline logs' });
   }
 });
+// requireDMUnlock middleware checks monetization OR dmUnlocked status
+async function requireDMUnlock(req,res,next){
+  const userId = req.user.userId; 
+  const monetized = await isUserMonetized(userId);
+  if(monetized) return next();
+
+  const db = getDbShard(userId);
+  const u = await db.client.user.findUnique({where:{id:userId}});
+  if(!u?.dmUnlocked) return res.status(403).json({error:"Unlock DM for 3000 or gain monetization (7 days + 10 followers)"});
+  next();
+}
 // ========== SOCKET.IO & V4.6 FALLBACK MESSAGING ==========
 app.post('/api/message/send', authenticateToken, requireDMUnlock, async (req,res)=>{
   const {receiverId, text} = req.body;
@@ -1701,18 +1712,6 @@ cron.schedule('*/10 * * * * *', async () => {
     interactionBuffer.unshift(...failedItems);
   }
 });
-// requireDMUnlock middleware checks monetization OR dmUnlocked status
-async function requireDMUnlock(req,res,next){
-  const userId = req.user.userId; 
-  const monetized = await isUserMonetized(userId);
-  if(monetized) return next();
-
-  const db = getDbShard(userId);
-  const u = await db.client.user.findUnique({where:{id:userId}});
-  if(!u?.dmUnlocked) return res.status(403).json({error:"Unlock DM for 3000 or gain monetization (7 days + 10 followers)"});
-  next();
-}
-
 // 2. Nightly Monetization Evaluation (00:00 Daily)
 cron.schedule('0 0 * * *', async () => {
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
