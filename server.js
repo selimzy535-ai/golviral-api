@@ -1478,7 +1478,59 @@ app.get('/api/messages/:userId', authenticateToken, async (req,res)=>{
   });
   res.json(msgs)
 })
+// ========== GET ALL CONVERSATIONS - CHECK ALL 3 SHARDS ==========
+app.get('/api/messages', authenticateToken, async (req,res)=>{
+  const me = req.user.userId;
+  const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+  
+  let allMsgs = [];
+  
+  // 1. Get all messages from all 3 shards
+  for(const db of dbs){
+    try {
+      const msgs = await db.message.findMany({
+        where: { OR:[{senderId:me},{receiverId:me}] },
+        orderBy:{createdAt:'desc'},
+        take: 100
+      });
+      allMsgs.push(...msgs);
+    } catch(e){ console.error('[Msg Shard Error]', e.message) }
+  }
 
+  if(allMsgs.length === 0) return res.json({chats: []});
+
+  // 2. Sort all messages globally and get unique users
+  allMsgs.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const otherIds = [...new Set(allMsgs.map(m => m.senderId === me ? m.receiverId : m.senderId))];
+
+  // 3. Get user data from all shards in 1 go
+  let allUsers = [];
+  for(const db of dbs){
+    try {
+      const users = await db.user.findMany({
+        where: { id: { in: otherIds } },
+        select: { id: true, username: true }
+      });
+      allUsers.push(...users);
+    } catch(e){}
+  }
+  const userMap = new Map(allUsers.map(u => [u.id, u]));
+
+  // 4. Build chat list with only last message per user
+  const chats = [];
+  for(const m of allMsgs){
+    const otherId = m.senderId === me ? m.receiverId : m.senderId;
+    if(!chats.find(c => c.userId === otherId)){
+      chats.push({
+        userId: otherId,
+        username: userMap.get(otherId)?.username || 'User',
+        lastMessage: m.text,
+        lastTime: m.createdAt
+      })
+    }
+  }
+  res.json({chats});
+});
 app.post('/api/gift/send', authenticateToken, async (req,res)=>{
   const {receiverId} = req.body;
   const senderId = req.user.userId;
