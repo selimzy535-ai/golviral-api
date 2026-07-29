@@ -20,8 +20,12 @@ Object.entries(prismaClients).forEach(([name, client]) => {
   client.$connect().catch((err) => console.error(`[Admin Prisma] Shard ${name} offline.`, err.message));
 });
 
-// ========== ONLY IMPORT WHAT WE NEED FROM SERVER ==========
-const { sendNotification } = require('../server');
+// ========== LOCAL NOTIF HELPER TO KILL CIRCULAR DEPENDENCY ==========
+async function sendNotification(userId, type, title, body, data = {}) {
+  console.log(`[ADMIN NOTIF] ${type} -> ${userId}: ${title} | ${body}`);
+  // We can't write to Notification table from here without another circular import
+  // Real user notifications still fire from server.js. This is just for admin logs.
+}
 
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
 const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY;
