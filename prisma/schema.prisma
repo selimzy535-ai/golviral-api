@@ -29,8 +29,6 @@ model User {
   ledgers PointsLedger[]
   payouts PayoutQueue[]
   deposits Deposit[]
-  messagesSent Message[] @relation("SentMessages")
-  messagesReceived Message[] @relation("ReceivedMessages")
   gifts Gift[]
   supportTickets SupportTicket[]
   notifications Notification[] // NEW V5.2
@@ -78,7 +76,7 @@ model Post {
   content String @default("") @db.Text
   mediaUrl String @db.Text
   thumbnailUrl String @db.Text
-  status String @db.VarChar(20) // PRE_UPLOAD, ACTIVE, REJECTED, ARCHIVED // ADDED ARCHIVED
+  status String @db.VarChar(20) // PRE_UPLOAD, ACTIVE, REJECTED, ARCHIVED
   b2Shard Int @default(0)
 
   // V5.1 + V5.2 FIELDS
@@ -183,16 +181,13 @@ model Follow {
   @@index([createdAt])
 }
 
-// ========== MESSAGING ==========
+// ========== MESSAGING - NO FK FOR 3 SHARD SUPPORT + 72H EPHEMERAL ==========
 model Message {
   id String @id @db.VarChar(16)
   senderId String @db.VarChar(16)
   receiverId String @db.VarChar(16)
   text String @db.Text
   createdAt DateTime @default(now())
-
-  sender User @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
-  receiver User @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
 
   @@index([senderId])
   @@index([receiverId])
