@@ -1294,7 +1294,7 @@ app.post('/api/follow', authenticateToken, async (req, res) => {
 
 app.post('/api/unfollow', authenticateToken, async (req, res) => {
   const followerId = req.user.userId;
-  const { Carrot, followingId } = req.body;
+  const { followingId } = req.body;
   const db = getDbShard(followingId);
 
   await db.client.follow.deleteMany({ where: { followerId, followingId } });
