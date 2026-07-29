@@ -431,7 +431,7 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
     switch (action) {
       case 'LIKE': pointsToAdd = isCreator ? 10 : 1; break;
       case 'COMMENT': pointsToAdd = isCreator ? 15 : 3; break;
-      case 'VIEW_REEL': pointsToAdd = isCreator ? 0.2 : 0; break; 
+      case 'VIEW_REEL': pointsToAdd = isCreator ? 2 : 0; break; 
       case 'READ_NOVEL': pointsToAdd = 10; break;
       case 'READ_STORY': pointsToAdd = 10; break;
       case 'REFERRAL_BONUS': pointsToAdd = 1000; break;
@@ -1913,6 +1913,25 @@ cron.schedule('0 * * * *', async () => {
       console.error('[Boost Expiration Process Error]', err.message);
     }
   }
+});
+
+// 7. 72H EPHEMERAL DM DELETION (Every 1 hour)
+cron.schedule('0 * * * *', async () => {
+  const cutoffTime = new Date(Date.now() - 72 * 60 * 60 * 1000);
+  let deletedTotal = 0;
+  
+  const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+  for (const db of targets) {
+    try {
+      const deleted = await db.message.deleteMany({
+        where: { createdAt: { lt: cutoffTime } }
+      }).catch(() => ({ count: 0 }));
+      deletedTotal += deleted.count;
+    } catch (err) {
+      console.error('[DM Cleanup Cron Error]', err.message);
+    }
+  }
+  if (deletedTotal > 0) console.log(`[DM CRON] Deleted ${deletedTotal} messages >72h`);
 });
 
 // ========== HEALTH CHECK UP ==========
