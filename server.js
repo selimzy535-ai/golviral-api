@@ -866,22 +866,51 @@ app.get('/api/comments/:postId', async (req, res) => {
     const target = await findPostAcrossShards(postId);
     if (!target) return res.status(404).json({ error: 'Post not found' });
 
-    const comments = await target.db.comment.findMany({
-      where: { postId },
-      select: {
-        id: true, text: true, createdAt: true,
-        user: { select: { id: true, username: true } }
-      },
-      orderBy: { createdAt: 'desc' },
-      skip: (Number(page) - 1) * Number(limit),
-      take: Number(limit)
-    });
+    const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+    let allComments = [];
 
-    res.json({ comments, total: comments.length });
+    // 1. Get comments from all 3 shards
+    for(const db of dbs){
+      try {
+        const comments = await db.comment.findMany({
+          where: { postId },
+          select: { id: true, text: true, createdAt: true, userId: true },
+          orderBy: { createdAt: 'desc' },
+          take: 100
+        });
+        allComments.push(...comments);
+      } catch(e){ console.error('[Comment Shard Error]', e.message) }
+    }
+    
+    // 2. Sort globally and paginate
+    allComments.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+    const paginated = allComments.slice((Number(page) - 1) * Number(limit), Number(page) * Number(limit));
+
+    // 3. Get usernames from all shards
+    const userIds = [...new Set(paginated.map(c => c.userId))];
+    let allUsers = [];
+    for(const db of dbs){
+      try {
+        const users = await db.user.findMany({
+          where: { id: { in: userIds } },
+          select: { id: true, username: true }
+        });
+        allUsers.push(...users);
+      } catch(e){}
+    }
+    const userMap = new Map(allUsers.map(u => [u.id, u]));
+
+    // 4. Attach username
+    const finalComments = paginated.map(c => ({
+      ...c,
+      user: userMap.get(c.userId) || { id: c.userId, username: 'User' }
+    }));
+
+    res.json({ comments: finalComments, total: allComments.length });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load comments' });
   }
-});       
+});
 
 app.post('/api/read-session', authenticateToken, (req, res) => {
   const { contentId, authorId, contentType } = req.body;
@@ -1196,9 +1225,7 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
     const refs = await db.client.referral.count({ where: { referrerId: userId, status: 'QUALIFIED' } }).catch(() => 0);
     const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000) || 0;
 
-    let followers = 0;
-    const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
-    for (const shard of dbs) followers += await shard.follow.count({ where: { followingId: userId } }).catch(() => 0);
+  const followers = await getTotalFollowers(userId);
 
     res.json({
       freeCredits: user.freeCredits,
