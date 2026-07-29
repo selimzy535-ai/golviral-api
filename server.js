@@ -263,41 +263,40 @@ io.on('connection', (socket) => {
   onlineUsers.set(socket.userId, socket.id);
   socket.join(socket.userId);
 
-  // 1. SEND MESSAGE REALTIME
-  socket.on('send_message', async ({ receiverId, text }) => {
-    const db = getDbShard(receiverId);
+// 1. SEND MESSAGE REALTIME - 72H EPHEMERAL + DUAL SHARD SAVE
+socket.on('send_message', async ({ receiverId, text }) => {
     const senderDb = getDbShard(socket.userId);
+    const receiverDb = getDbShard(receiverId);
 
     const sender = await senderDb.client.user.findUnique({where:{id:socket.userId}});
-    const receiver = await db.client.user.findUnique({where:{id:receiverId}});
+    const receiver = await receiverDb.client.user.findUnique({where:{id:receiverId}});
+    if(!sender ||!receiver) return socket.emit('error_msg', {error: "User not found"});
 
-    // DM is Free only if the user (or target) is monetized, otherwise they must have paid (dmUnlocked === true)
     const senderEligible = (await isUserMonetized(socket.userId)) || sender.dmUnlocked;
     const receiverEligible = (await isUserMonetized(receiverId)) || receiver.dmUnlocked;
 
-    if(!senderEligible || !receiverEligible){
+    if(!senderEligible ||!receiverEligible){
       return socket.emit('error_msg', {error: "Both users must unlock DM or have monetization active (7 days + 10 followers)"});
     }
 
-    // Save to DB
-    const msg = await db.client.message.create({
-      data: {
-        id: crypto.randomBytes(8).toString('hex'),
-        senderId: socket.userId,
-        receiverId,
-        text
-      }
-    });
+    const msgId = crypto.randomBytes(8).toString('hex');
+    const msgData = { id: msgId, senderId: socket.userId, receiverId, text };
+
+    // SAVE TO BOTH SHARDS TO AVOID FK ERROR
+    const ops = [senderDb.client.message.create({ data: msgData })];
+    if(senderDb.name!== receiverDb.name){
+      ops.push(receiverDb.client.message.create({ data: msgData }));
+    }
+    await Promise.all(ops).catch(e => console.error("DM Save Error", e));
 
     const receiverSocketId = onlineUsers.get(receiverId);
     if(receiverSocketId){
-      io.to(receiverId).emit('receive_message', msg);
+      io.to(receiverId).emit('receive_message', msgData);
     }
 
-    sendNotification(receiverId, 'DM', 'New Message', `Message from ${sender.username}`); // ✅ FIXED
-    
-    socket.emit('receive_message', msg);
-  });
+    sendNotification(receiverId, 'DM', 'New Message', `Message from ${sender.username}`);
+    socket.emit('receive_message', msgData);
+});
 
   socket.on('typing', ({receiverId}) => {
     io.to(receiverId).emit('user_typing', {from: socket.userId});
@@ -1463,20 +1462,65 @@ async function requireDMUnlock(req,res,next){
 app.post('/api/message/send', authenticateToken, requireDMUnlock, async (req,res)=>{
   const {receiverId, text} = req.body;
   const senderId = req.user.userId;
-  const db = getDbShard(receiverId);
-  await db.client.message.create({data:{id:crypto.randomBytes(8).toString('hex'), senderId, receiverId, text}});
+
+  const senderDb = getDbShard(senderId);
+  const receiverDb = getDbShard(receiverId);
+  const msgId = crypto.randomBytes(8).toString('hex');
+  const msgData = {id: msgId, senderId, receiverId, text};
+
+  const ops = [senderDb.client.message.create({data: msgData})];
+  if(senderDb.name!== receiverDb.name){
+    ops.push(receiverDb.client.message.create({data: msgData}));
+  }
+  await Promise.all(ops);
+
   res.json({sent:true})
 })
 
+// ========== GET DM HISTORY BETWEEN 2 USERS - CHECKS BOTH SHARDS ==========
 app.get('/api/messages/:userId', authenticateToken, async (req,res)=>{
-  const me = req.user.userId; 
-  const other = req.params.userId;
-  const db = getDbShard(me);
-  const msgs = await db.client.message.findMany({
-    where:{ OR:[{senderId:me, receiverId:other},{senderId:other, receiverId:me}] },
-    orderBy:{createdAt:'asc'}, take:100
-  });
-  res.json(msgs)
+  try {
+    const me = req.user.userId;
+    const other = req.params.userId;
+
+    // We need to check both sender's shard and receiver's shard
+    const meDb = getDbShard(me).client;
+    const otherDb = getDbShard(other).client;
+    const dbsToCheck = [meDb];
+    if(meDb!== otherDb) dbsToCheck.push(otherDb); // only add if different shard
+
+    let allMsgs = [];
+
+    for(const db of dbsToCheck){
+      try {
+        const msgs = await db.message.findMany({
+          where:{
+            OR:[
+              {senderId:me, receiverId:other},
+              {senderId:other, receiverId:me}
+            ]
+          },
+          orderBy:{createdAt:'asc'},
+          take:200 // get last 200
+        });
+        allMsgs.push(...msgs);
+      }catch(e){
+        console.error('[Msg History Shard Error]', e.message)
+      }
+    }
+
+    // Dedupe messages by ID in case they exist in both shards
+    const uniqueMsgs = [...new Map(allMsgs.map(item => [item.id, item])).values()];
+
+    // Sort again after dedupe
+    uniqueMsgs.sort((a,b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    res.json(uniqueMsgs);
+
+  } catch (err) {
+    console.error('[Get Messages Error]', err.message);
+    res.status(500).json({error: 'Failed to load messages'});
+  }
 })
 // ========== GET ALL CONVERSATIONS - CHECK ALL 3 SHARDS ==========
 app.get('/api/messages', authenticateToken, async (req,res)=>{
