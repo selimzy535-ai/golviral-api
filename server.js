@@ -190,6 +190,24 @@ async function findPostAcrossShards(id) {
   return null;
 }
 
+async function getTotalFollowers(userId) {
+  const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+  let total = 0;
+  for (const db of dbs) {
+    total += await db.follow.count({ where: { followingId: userId } }).catch(() => 0);
+  }
+  return total;
+}
+
+async function getTotalFollowing(userId) {
+  const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+  let total = 0;
+  for (const db of dbs) {
+    total += await db.follow.count({ where: { followerId: userId } }).catch(() => 0);
+  }
+  return total;
+}
+
 // Dynamic Monetization Check Helper
 async function isUserMonetized(userId) {
   const db = getDbShard(userId);
@@ -198,11 +216,7 @@ async function isUserMonetized(userId) {
   if (user.monetizeFlag) return true;
 
   const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000);
-  let followers = 0;
-  const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
-  for (const shard of dbs) {
-    followers += await shard.follow.count({ where: { followingId: userId } }).catch(() => 0);
-  }
+  const followers = await getTotalFollowers(userId); // FIXED
 
   if (days >= 7 && followers >= 10) {
     await db.client.user.update({
@@ -1225,18 +1239,16 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
       select: { id: true, views: true, likes: true }
     });
 
-    let followers = 0, following = 0, isFollowing = false;
+    const followers = await getTotalFollowers(targetId); // FIXED
+    const following = await getTotalFollowing(targetId); // FIXED
+    
+    let isFollowing = false;
     const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
-
-    for (const shard of dbs) {
-      followers += await shard.follow.count({ where: { followingId: targetId } }).catch(() => 0);
-      following += await shard.follow.count({ where: { followerId: targetId } }).catch(() => 0);
-      if(!isFollowing && meId !== targetId){
-        const rel = await shard.follow.findFirst({ 
-          where: { followerId: meId, followingId: targetId } 
-        }).catch(() => null);
-        if(rel) { isFollowing = true; }
-      }
+    for(const shard of dbs){
+      const rel = await shard.follow.findFirst({ 
+        where: { followerId: meId, followingId: targetId } 
+      }).catch(() => null);
+      if(rel) { isFollowing = true; break; }
     }
 
     const totalViews = posts.reduce((sum, p) => sum + p.views, 0);
@@ -1817,8 +1829,8 @@ cron.schedule('0 0 * * *', async () => {
       const users = await db.user.findMany({ where: { monetizeFlag: false } });
       for (const user of users) {
         const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000);
-        let followers = 0;
-        for(const shard of targets) followers += await shard.follow.count({ where: { followingId: user.id } }).catch(()=>0);
+        const followers = await getTotalFollowers(user.id); // FIXED
+        
         if (days >= 7 && followers >= 10) { 
           await db.user.update({ where: { id: user.id }, data: { monetizeFlag: true, freeFarmingStopped: true } });
           sendNotification(user.id, 'MONETIZE', 'Congrats! You\'re Earning 💰', 'You hit 7 days + 10 followers. Earnings now go to Cash.');
