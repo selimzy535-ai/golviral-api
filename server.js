@@ -20,6 +20,7 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const adminRoutes = require('./routes/admin'); 
+const { router: profileRoutes, requireFaceVerified, requireIdVerified } = require('./routes/profile');
 const webpush = require('web-push'); // npm i web-push
 const multer = require('multer'); // npm i multer
 
@@ -66,7 +67,7 @@ app.use(morgan('combined'));
 
 // MOUNT ADMIN ROUTES HERE - NOT AT THE BOTTOM
 app.use('/api/admin', adminRoutes);
-
+app.use('/api/profile', profileRoutes);
 // ========== 5. GLOBAL MEMORY & STATE MAPS ==========
 // Map userId to socketId for DM routing
 const onlineUsers = new Map();
@@ -1760,11 +1761,13 @@ app.post('/api/notifications/read/:id', authenticateToken, async (req, res) => {
   await db.client.notification.update({ where: { id: req.params.id }, data: { isRead: true } }).catch(()=>{});
   res.json({success: true});
 });
-// 3. EXPORT FOR ADMIN.JS TO USE
+// 3. EXPORT FOR profile.js + ADMIN.JS TO USE
 module.exports = {
   prismaClients,
   findPostAcrossShards,
-  sendNotification
+  sendNotification,
+  getDbShard,
+  processWalletTransaction
 };
 // ========== CHORE SYSTEM SCHEDULER CRON SERVICES ==========
 
