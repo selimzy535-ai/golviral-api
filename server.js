@@ -85,7 +85,8 @@ const prismaClients = {
   db2: new PrismaClient({ datasources: { db: { url: dbUrls[1] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db2" } } }),
   db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db3" } } }),
 };
-
+const { Pool } = require('pg');
+const profilePool = new Pool({ connectionString: process.env.DATABASEURL4, max: 10 });
 Object.entries(prismaClients).forEach(([name, client]) => {
   client.$connect()
     .then(() => console.log(`[Prisma Success] Connected cleanly to ${name}`))
@@ -219,6 +220,10 @@ async function isUserMonetized(userId) {
   const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000);
   const followers = await getTotalFollowers(userId); // FIXED
 
+  // NEW: CHECK FACE VERIFY TOO
+  const {rows} = await profilePool.query(`SELECT face_verified FROM profiles WHERE user_id=$1`, [userId]);
+  if(!rows[0]?.face_verified) return false;
+
   if (days >= 7 && followers >= 10) {
     await db.client.user.update({
       where: { id: userId },
@@ -228,7 +233,6 @@ async function isUserMonetized(userId) {
   }
   return false;
 }
-
 // ========== EMAIL ENGINE ==========
 async function sendEmail(to, subject, html) {
   if (!to) return console.error('[Email Engine Error] Recipient field undefined.');
