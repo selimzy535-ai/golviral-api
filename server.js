@@ -85,8 +85,7 @@ const prismaClients = {
   db2: new PrismaClient({ datasources: { db: { url: dbUrls[1] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db2" } } }),
   db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db3" } } }),
 };
-const { Pool } = require('pg');
-const profilePool = new Pool({ connectionString: process.env.DATABASEURL4, max: 10 });
+
 Object.entries(prismaClients).forEach(([name, client]) => {
   client.$connect()
     .then(() => console.log(`[Prisma Success] Connected cleanly to ${name}`))
