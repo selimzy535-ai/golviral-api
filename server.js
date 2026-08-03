@@ -23,7 +23,7 @@ const adminRoutes = require('./routes/admin');
 const { router: profileRoutes, requireFaceVerified, requireIdVerified } = require('./routes/profile');
 const webpush = require('web-push'); // npm i web-push
 const multer = require('multer'); // npm i multer
-
+const { prismaClients, redisClients, getDbShard, getRedisShard, profilePool } = require('./utils/shard');
 // ========== 2. ENV CONFIG & CONSTANTS ==========
 const PORT = process.env.PORT || 10000;
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
@@ -74,41 +74,6 @@ const onlineUsers = new Map();
 let interactionBuffer = [];
 
 // ========== 6. 3x SHARDING PRISMA CLIENTS ==========
-const dbUrls = [
-  process.env.DATABASEURL1,
-  process.env.DATABASEURL2,
-  process.env.DATABASEURL3
-];
-
-const prismaClients = {
-  db1: new PrismaClient({ datasources: { db: { url: dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db1" } } }),
-  db2: new PrismaClient({ datasources: { db: { url: dbUrls[1] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db2" } } }),
-  db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db3" } } }),
-};
-
-Object.entries(prismaClients).forEach(([name, client]) => {
-  client.$connect()
-    .then(() => console.log(`[Prisma Success] Connected cleanly to ${name}`))
-    .catch((err) => console.error(`[Prisma Warning] Shard ${name} offline on start.`, err.message));
-});
-
-// ========== 3x REDIS CLIENTS ==========
-const redisUrls = [
-  process.env.REDISURL1,
-  process.env.REDISURL2,
-  process.env.REDISURL3
-].map(u => (u && u.trim()) ? u.trim() : 'redis://127.0.0.1:6379');
-
-const redisClients = {
-  redis1: new Redis(redisUrls[0], { maxRetriesPerRequest: 1, retryStrategy: (times) => Math.min(times * 50, 2000) }),
-  redis2: new Redis(redisUrls[1] || redisUrls[0], { maxRetriesPerRequest: 1, retryStrategy: (times) => Math.min(times * 50, 2000) }),
-  redis3: new Redis(redisUrls[2] || redisUrls[0], { maxRetriesPerRequest: 1, retryStrategy: (times) => Math.min(times * 50, 2000) }),
-};
-
-Object.entries(redisClients).forEach(([name, client]) => {
-  client.on('error', (err) => console.error(`[Redis Error] Shard ${name}: ${err.message}`));
-  client.on('connect', () => console.log(`[Redis Connected] Shard ${name} established.`));
-});
 
 // ========== 3x BACKBLAZE B2 MATRIX ==========
 const b2Config = {
@@ -131,25 +96,6 @@ webpush.setVapidDetails(
 );
 
 // ========== 7. HELPER FUNCTIONS & ROUTING HELPERS ==========
-function getShardIndex(id) {
-  if (!id) return 0;
-  return parseInt(id, 36) % 3;
-}
-
-function getDbShard(userId) {
-  const idx = getShardIndex(userId);
-  if (idx === 1) return { client: prismaClients.db2, name: 'db2' };
-  if (idx === 2) return { client: prismaClients.db3, name: 'db3' };
-  return { client: prismaClients.db1, name: 'db1' };
-}
-
-function getRedisShard(userId) {
-  const idx = getShardIndex(userId);
-  if (idx === 1) return redisClients.redis2;
-  if (idx === 2) return redisClients.redis3;
-  return redisClients.redis1;
-}
-
 function getB2Shard(userId) {
   const idx = getShardIndex(userId);
   if (idx === 1) return { client: b2Clients.b2b, bucket: b2Config.b.bucket };
@@ -1226,10 +1172,13 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User mapping data footprint missing' });
 
     const todayEarned = parseFloat(await redis.get(`cap:${userId}:${today}`).catch(() => '0') || '0');
-    const refs = await db.client.referral.count({ where: { referrerId: userId, status: 'QUALIFIED' } }).catch(() => 0);
-    const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000) || 0;
 
-  const followers = await getTotalFollowers(userId);
+    // NEW: Count both types
+    const refsQualified = await db.client.referral.count({ where: { referrerId: userId, status: 'QUALIFIED' } }).catch(() => 0);
+    const refsPending = await db.client.referral.count({ where: { referrerId: userId, status: 'PENDING' } }).catch(() => 0);
+
+    const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000) || 0;
+    const followers = await getTotalFollowers(userId);
 
     res.json({
       freeCredits: user.freeCredits,
@@ -1237,12 +1186,18 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
       todayEarnings: todayEarned,
       dailyCapProgress: `${todayEarned}/10000`,
       daysToMonetize: Math.max(0, 7 - days),
-      refsLeft: Math.max(0, 5 - refs),
+
+      refsQualified, // Already paid 1000 each
+      refsPending, // Will pay 1000 each after KYC
+      estimatedPending: refsPending * 1000, // Show "fake" balance like old
+
+      refsLeft: Math.max(0, 5 - refsQualified), // Slots left to earn
       monetized: user.monetizeFlag,
-      followersProgress: `${followers}/10`, 
-      daysProgress: `${days}/7` 
+      followersProgress: `${followers}/10`,
+      daysProgress: `${days}/7`
     });
   } catch (err) {
+    console.error('[Wallet Error]', err.message);
     res.status(200).json({ freeCredits: 0, cashBalance: 0, todayEarnings: 0, degradedModeActive: true });
   }
 });
@@ -1344,71 +1299,106 @@ app.post('/api/unfollow', authenticateToken, async (req, res) => {
 });
 
 
-// ========== V5.1 REDESIGNED WITHDRAWAL GATEWAY ==========
-app.post('/api/wallet/withdraw', authenticateToken, async (req, res) => {
+
+// ========== V5.2 WITHDRAWAL GATEWAY WITH KYC ==========
+app.post('/api/wallet/withdraw', authenticateToken, requireFaceVerified, requireIdVerified, async (req, res) => {
   try {
     const { userId } = req.user;
     const { amountPoints, method, routingTarget, targetDetails } = req.body; // method: 'BANK' or 'USDT'
+    const numericPoints = Number(amountPoints);
+
     const db = getDbShard(userId);
     const redis = getRedisShard(userId);
 
-    // Minimum limit constraints
-    if (amountPoints < 50000) {
-      return res.status(400).json({ error: 'Minimum withdrawal dynamic baseline is 50,000 pts (₦5000)' });
+    // 1. CHECK MONETIZATION: 7 days + 10 followers
+    const user = await db.client.user.findUnique({ where: { id: userId } });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const days = Math.floor((Date.now() - new Date(user.createdAt).getTime()) / 86400000);
+    const followers = await getTotalFollowers(userId);
+
+    if (!user.monetizeFlag && (days < 7 || followers < 10)) {
+      return res.status(403).json({ 
+        error: `Monetization required. You need 7 days and 10 followers. Current: ${days} days, ${followers} followers` 
+      });
     }
 
-    // USDT specific validation matrix
+    // Auto-flip monetizeFlag if they qualify now
+    if (!user.monetizeFlag) {
+      await db.client.user.update({
+        where: { id: userId },
+        data: { monetizeFlag: true, freeFarmingStopped: true }
+      });
+    }
+
+    // 2. MINIMUM LIMIT
+    if (isNaN(numericPoints) || numericPoints < 50000) {
+      return res.status(400).json({ error: 'Minimum withdrawal is 50,000 pts (₦5000)' });
+    }
+
+    // 3. BALANCE CHECK - MUST BE CASH
+    if (user.cashBalance < numericPoints) {
+      return res.status(400).json({ error: 'Insufficient cash balance. Free credits cannot be withdrawn' });
+    }
+
+    // 4. USDT specific validation
     if (method === 'USDT') {
-      if (amountPoints !== 120000 && amountPoints !== 12000000) {
-        return res.status(400).json({ error: 'USDT withdrawals are only allowed for exact tier bounds: 120,000 pts ($10) or 12,000,000 pts ($100)' });
+      if (numericPoints !== 120000 && numericPoints !== 12000000) {
+        return res.status(400).json({ error: 'USDT withdrawals only: 120,000 pts ($10) or 12,000,000 pts ($100)' });
       }
-      // TRC20 Address compliance check (Starts with T, alphanumerical base)
+
+      // Safely resolve address whether sent as string or object
+      const usdtAddress = typeof targetDetails === 'string' 
+        ? targetDetails 
+        : (targetDetails?.address || '');
+
       const trc20Regex = /^T[A-Za-z1-9]{33}$/;
-      if (!trc20Regex.test(targetDetails?.trim())) {
-        return res.status(400).json({ error: 'Only USDT TRC20 addresses are allowed' });
+      if (!usdtAddress || !trc20Regex.test(usdtAddress.trim())) {
+        return res.status(400).json({ error: 'Only USDT TRC20 addresses allowed' });
       }
     } 
-    // Local bank specific validation matrix
+    // 5. BANK specific validation
     else if (method === 'BANK') {
-      if (!targetDetails || !targetDetails.bankName || !targetDetails.accountNumber || !targetDetails.accountName) {
-        return res.status(400).json({ error: 'Nigeria Bank withdrawals require bankName, accountNumber, and accountName' });
+      if (
+        !targetDetails || 
+        typeof targetDetails !== 'object' || 
+        !targetDetails.bankName || 
+        !targetDetails.accountNumber || 
+        !targetDetails.accountName
+      ) {
+        return res.status(400).json({ error: 'Bank withdrawals require bankName, accountNumber, and accountName' });
       }
     } else {
-      return res.status(400).json({ error: 'Invalid withdrawal vector. Selection must be BANK or USDT' });
+      return res.status(400).json({ error: 'Invalid method. Must be BANK or USDT' });
     }
 
-    // Limit check: Max 1 payout submission permitted every 7 days (7 day hold check)
+    // 6. LIMIT: 1 withdrawal per 7 days
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const recentPayout = await db.client.payoutQueue.findFirst({
-      where: {
-        userId,
-        createdAt: { gte: sevenDaysAgo }
-      }
+      where: { userId, createdAt: { gte: sevenDaysAgo } }
     });
 
     if (recentPayout) {
-      return res.status(429).json({ error: 'Withdrawal locked. Limit 1 withdrawal transaction per week.' });
+      return res.status(429).json({ error: 'Withdrawal locked. 1 withdrawal per week only' });
     }
 
-    const user = await db.client.user.findUnique({ where: { id: userId } });
-    if (!user.monetizeFlag || user.cashBalance < amountPoints) {
-      return res.status(400).json({ error: 'Financial criteria parameter denied: Insufficient cash balance or unmonetized account status' });
-    }
-
+    // 7. SEND OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const payload = { amountPoints, method, routingTarget, targetDetails, otp };
+    const payload = { amountPoints: numericPoints, method, routingTarget, targetDetails, otp };
 
     await redis.set(`withdraw_otp:${userId}`, JSON.stringify(payload), 'EX', 600).catch(() => {
       global[`withdraw_otp_${userId}`] = { payload, exp: Date.now() + 600000 };
     });
 
-    await sendEmail(user.email, 'Authorization OTP Sequence Generated', `<p>Withdrawal verification challenge code: <b>${otp}</b></p>`);
-    res.json({ authChallenge: true });
+    await sendEmail(user.email, 'Withdrawal OTP - GolViral', `<p>Your withdrawal code: <b>${otp}</b>. Valid 10 minutes.</p>`);
+    res.json({ authChallenge: true, message: 'OTP sent to email' });
+
   } catch (err) {
     console.error('[Withdraw Init Error]', err.message);
-    res.status(500).json({ error: 'Financial gateway breakdown bypass active' });
+    res.status(500).json({ error: 'Withdrawal gateway error' });
   }
 });
+
 
 app.post('/api/wallet/withdraw/confirm', authenticateToken, async (req, res) => {
   const { userId } = req.user;
@@ -1985,6 +1975,6 @@ app.get('/', (req, res) => {
 });
 
 // ========== START PORT BOOTSTRAP ==========
-server.listen(PORT, () => { 
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`[SYSTEM BOOT SUCCESSFUL] WS + HTTP Listening on port: ${PORT}`);
 });
