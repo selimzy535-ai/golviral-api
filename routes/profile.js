@@ -3,10 +3,9 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 
 // FIX 1: Import from utils/shard instead of creating new Pool
-const { profilePool, prismaClients, getDbShard } = require('../utils/shard');
+const { profilePool, prismaClients, getDbShard, processWalletTransaction } = require('../utils/shard');
 
 // FIX 2: Only import the function, not the whole server to avoid circle
-const { processWalletTransaction } = require('../server');
 
 // ========== HELPERS ==========
 async function getProfile(userId) {
