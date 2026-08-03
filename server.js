@@ -96,6 +96,12 @@ webpush.setVapidDetails(
 );
 
 // ========== 7. HELPER FUNCTIONS & ROUTING HELPERS ==========
+
+function getShardIndex(id) {
+  if (!id) return 0;
+  return parseInt(id, 36) % 3;
+}
+
 function getB2Shard(userId) {
   const idx = getShardIndex(userId);
   if (idx === 1) return { client: b2Clients.b2b, bucket: b2Config.b.bucket };
