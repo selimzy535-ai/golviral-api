@@ -68,4 +68,81 @@ function getRedisShard(userId) {
   return redisClients.redis1;
 }
 
-module.exports = { prismaClients, redisClients, getDbShard, getRedisShard, profilePool };
+// ========== TRANSACTION CONCURRENCY ENGINE ==========
+async function processWalletTransaction({ userId, action, isCreator, meta = {} }) {
+  if (!userId) return;
+  const redis = getRedisShard(userId);
+  const db = getDbShard(userId);
+
+  let lockAcquired = false;
+  try {
+    const lock = await redis.set(`lock:${userId}`, '1', 'EX', 3, 'NX').catch(() => 'DYNAMIC_PASS');
+    if (!lock) return;
+    lockAcquired = true;
+
+    const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
+    if (!user) return;
+
+    const walletType = user.monetizeFlag ? 'CASH' : 'FREE';
+    let pointsToAdd = 0;
+
+    switch (action) {
+      case 'LIKE': pointsToAdd = isCreator ? 10 : 1; break;
+      case 'COMMENT': pointsToAdd = isCreator ? 15 : 3; break;
+      case 'VIEW_REEL': pointsToAdd = isCreator ? 2 : 0; break; 
+      case 'READ_NOVEL': pointsToAdd = 10; break;
+      case 'READ_STORY': pointsToAdd = 10; break;
+      case 'REFERRAL_BONUS': pointsToAdd = 1000; break;
+      case 'GIFT': pointsToAdd = meta.points || 0; break; 
+    }
+    if (pointsToAdd === 0) return;
+
+    if (walletType === 'CASH') {
+      const today = new Date().toISOString().split('T')[0];
+      const capKey = `cap:${userId}:${today}`;
+      const current = parseFloat(await redis.get(capKey).catch(() => '0') || '0');
+      if (current >= 10000) return;
+      if (current + pointsToAdd > 10000) pointsToAdd = 10000 - current;
+      await redis.incrbyfloat(capKey, pointsToAdd).catch(() => {});
+      await redis.expire(capKey, 90000).catch(() => {});
+    }
+
+    if (!isCreator) {
+      const limitKey = `limit:${userId}:${action.toLowerCase()}`;
+      const count = await redis.incr(limitKey).catch(() => 0);
+      if (action === 'LIKE' && count > 50) return;
+      if (action === 'COMMENT' && count > 30) return;
+      await redis.expire(limitKey, 86400).catch(() => {});
+    }
+
+    await db.client.$transaction([
+      db.client.pointsLedger.create({
+        data: { userId, amount: pointsToAdd, type: walletType, action, referenceId: meta.refId || '' }
+      }),
+      db.client.user.update({
+        where: { id: userId },
+        data: {
+          freeCredits: walletType === 'FREE' ? { increment: pointsToAdd } : undefined,
+          cashBalance: walletType === 'CASH' ? { increment: pointsToAdd } : undefined,
+        }
+      })
+    ]);
+  } catch (err) {
+    console.error(`[Transaction Intercept] Error: ${err.message}`);
+  } finally {
+    if (lockAcquired) {
+      await redis.del(`lock:${userId}`).catch(() => {});
+    }
+  }
+}
+
+module.exports = { 
+  prismaClients, 
+  redisClients, 
+  getDbShard, 
+  getRedisShard, 
+  profilePool, 
+  processWalletTransaction // <-- EXPORT IT HERE
+};
+
+
