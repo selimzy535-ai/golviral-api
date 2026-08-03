@@ -1080,35 +1080,69 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
     const { userId } = req.user;
     const { tx_ref, token, passToken } = req.body;
 
-    if (!(await internalVerifyPassToken(passToken))) return res.status(400).json({ error: 'Math verification failed' });
-    if (!tx_ref || !token) return res.status(400).json({ error: 'Missing tx_ref or token' });
+    if (!(await internalVerifyPassToken(passToken)))
+      return res.status(400).json({ error: 'Math verification failed' });
+    if (!tx_ref ||!token)
+      return res.status(400).json({ error: 'Missing tx_ref or token' });
 
     const db = getDbShard(userId);
 
+    // 1. Check if this tx_ref was already used ANYWHERE. Prevents double spend
+    const alreadyUsed = await db.client.deposit.findFirst({
+      where: { reference: tx_ref, status: 'SUCCESS' }
+    });
+    if (alreadyUsed) {
+      return res.json({ success: true, message: 'Payment already processed' }); // 200, not 400
+    }
+
+    // 2. Find the pending deposit ticket
     const deposit = await db.client.deposit.findFirst({
       where: { userId, token, status: 'PENDING', expiresAt: { gt: new Date() } }
     });
 
     if (!deposit) return res.status(400).json({ error: 'Invalid or expired ticket' });
 
-    const usedTx = await db.client.deposit.findFirst({ where: { reference: tx_ref, status: 'SUCCESS' } });
-    if (usedTx) return res.status(400).json({ error: 'Payment already redeemed' });
-
     const ops = [
-      db.client.deposit.update({ where: { id: deposit.id }, data: { reference: tx_ref, status: 'SUCCESS' } })
+      // Lock the deposit so it can't be used again
+      db.client.deposit.update({
+        where: { id: deposit.id },
+        data: { reference: tx_ref, status: 'SUCCESS' }
+      })
     ];
 
     let resp = { success: true };
 
+    // 3. Route based on meta type
     if (deposit.meta === "DM_UNLOCK") {
-      ops.push(db.client.user.update({ where: { id: userId }, data: { isVerified: true, dmUnlocked: true } }));
+      ops.push(
+        db.client.user.update({
+          where: { id: userId },
+          data: { isVerified: true, dmUnlocked: true }
+        })
+      );
       resp.unlocked = "DM";
+
     } else if (deposit.meta?.startsWith("GIFT_")) {
       const giftType = deposit.meta.split('_')[1];
       const pack = GIFT_PACKS[giftType];
       if(!pack) return res.status(400).json({error:"Invalid gift"});
-      ops.push(db.client.gift.create({ data:{ id: crypto.randomBytes(8).toString('hex'), buyerId: userId, giftType, price: deposit.amountNaira, pointsPerGift: pack.points, giftsSent: 0, giftsTotal: pack.giftsTotal, expiresAt: new Date(Date.now() + 30*24*60*60*1000) } }));
+
+      ops.push(
+        db.client.gift.create({
+          data:{
+            id: crypto.randomBytes(8).toString('hex'),
+            buyerId: userId,
+            giftType,
+            price: deposit.amountNaira,
+            pointsPerGift: pack.points,
+            giftsSent: 0,
+            giftsTotal: pack.giftsTotal,
+            expiresAt: new Date(Date.now() + 30*24*60*60*1000)
+          }
+        })
+      );
       resp.gift = giftType;
+
     } else if (deposit.meta?.startsWith("BOOST_")) {
       const parts = deposit.meta.split('_');
       const targetPostId = parts[1];
@@ -1129,18 +1163,37 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
         resp.boosted = targetPostId;
         resp.expiresAt = expireDate;
       }
+
     } else {
+      // 4. DEFAULT: BUY POINTS. Use increment so retry is safe
       ops.push(
-        db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: deposit.points } } }),
-        db.client.pointsLedger.create({ data: { userId, amount: deposit.points, type: 'FREE', action: 'DEPOSIT', referenceId: tx_ref } })
+        db.client.user.update({
+          where: { id: userId },
+          data: { freeCredits: { increment: deposit.points } }
+        }),
+        db.client.pointsLedger.create({
+          data: {
+            userId,
+            amount: deposit.points,
+            type: 'FREE',
+            action: 'DEPOSIT',
+            referenceId: tx_ref
+          }
+        })
       );
       resp.credited = deposit.points;
     }
 
+    // 5. Run all ops in 1 transaction. If 1 fails, all rollback
     await db.client.$transaction(ops);
     res.json(resp);
+
   } catch (err) {
     console.error('[Payment Verify Error]', err.message);
+    // Handle race condition: 2 requests at same time
+    if(err.code === 'P2002') {
+      return res.json({ success: true, message: 'Payment already processed' });
+    }
     res.status(500).json({ error: 'Payment verification failed' });
   }
 });
