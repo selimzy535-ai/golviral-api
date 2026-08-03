@@ -1,14 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
-
-// ========== DB4 PROFILE POOL ==========
-const profilePool = new Pool({
-  connectionString: process.env.DATABASEURL4,
-  max: 10
-});
-
+const { Pool } = require('pg');
 profilePool.on('error', (err) => console.error('[ProfileDB Error]', err.message));
 
 // Import these from server.js for referral payouts
