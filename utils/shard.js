@@ -1,3 +1,4 @@
+
 // utils/shard.js
 const { PrismaClient } = require('@prisma/client');
 const Redis = require('ioredis');
@@ -12,7 +13,7 @@ const dbUrls = [
 
 const prismaClients = {
   db1: new PrismaClient({ datasources: { db: { url: dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db1" } } }),
-  db2: new PrismaClient({ datasources: { db: { url: dbUrls[1] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db2" } }),
+  db2: new PrismaClient({ datasources: { db: { url: dbUrls[1] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db2" } } }),
   db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db3" } } }),
 };
 
@@ -27,7 +28,7 @@ const redisUrls = [
   process.env.REDISURL1,
   process.env.REDISURL2,
   process.env.REDISURL3
-].map(u => (u && u.trim())? u.trim() : 'redis://127.0.0.1:6379');
+].map(u => (u && u.trim()) ? u.trim() : 'redis://127.0.0.1:6379');
 
 const redisClients = {
   redis1: new Redis(redisUrls[0], { maxRetriesPerRequest: 1, retryStrategy: (times) => Math.min(times * 50, 2000) }),
