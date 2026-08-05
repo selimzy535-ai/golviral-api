@@ -1231,9 +1231,14 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
     const totalLikes = posts.reduce((sum, p) => sum + p.likes, 0);
     const monetized = await isUserMonetized(targetId);
 
-    res.json({
+const profile = await profilePool.query(
+      `SELECT bio FROM profiles WHERE user_id=$1`, [targetId]
+    ).catch(()=>({rows:[]}));
+
+res.json({
       userId: targetId,
       username: user.username,
+      bio: profile.rows[0]?.bio || "",  // <-- ADD THIS
       isVerified: user.isVerified || monetized,     
       dmUnlocked: user.dmUnlocked || monetized,     
       totalViews,                                      
