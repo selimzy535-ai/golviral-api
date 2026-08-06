@@ -186,7 +186,9 @@ model Message {
   id String @id @db.VarChar(16)
   senderId String @db.VarChar(16)
   receiverId String @db.VarChar(16)
-  text String @db.Text
+  text String? @db.Text // <- make optional
+  url String? @db.Text // <- add this for stickers/base64
+  type String @default("text") @db.VarChar(20) // <- add this: "text" or "sticker"
   createdAt DateTime @default(now())
 
   @@index([senderId])
