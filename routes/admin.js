@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
+const { Pool } = require('pg');
 
 // ========== KILL CIRCULAR DEPENDENCY: MAKE OWN DB ==========
 const dbUrls = [
@@ -20,11 +21,17 @@ Object.entries(prismaClients).forEach(([name, client]) => {
   client.$connect().catch((err) => console.error(`[Admin Prisma] Shard ${name} offline.`, err.message));
 });
 
+// ========== DB4 = KYC DB = RAW SQL ==========
+const db4 = new Pool({
+  connectionString: process.env.DATABASEURL4,
+  max: 10
+});
+db4.on('error', (err) => console.error('[Admin DB4 Error]', err.message));
+
 // ========== LOCAL NOTIF HELPER TO KILL CIRCULAR DEPENDENCY ==========
 async function sendNotification(userId, type, title, body, data = {}) {
   console.log(`[ADMIN NOTIF] ${type} -> ${userId}: ${title} | ${body}`);
-  // We can't write to Notification table from here without another circular import
-  // Real user notifications still fire from server.js. This is just for admin logs.
+  // Hook this to your real notification service later
 }
 
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
@@ -205,7 +212,7 @@ router.get('/payouts', requireAdmin, async (req, res) => {
   const all = [];
   for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
     await db.payoutQueue.findMany({ where: { status: 'PENDING' } })
-      .then(r => all.push(...r)).catch(() => {});
+     .then(r => all.push(...r)).catch(() => {});
   }
   res.json(all);
 });
@@ -279,4 +286,70 @@ router.post('/support/reply', requireAdmin, async (req, res) => {
   }
 });
 
+// ========== 6. KYC ADMIN: LIST PENDING IDS FROM DB4 ==========
+router.get('/kyc/pending', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await db4.query(`
+      SELECT user_id, id_photo_temp, id_status, created_at
+      FROM profiles
+      WHERE id_status = 'PENDING'
+      ORDER BY created_at ASC
+      LIMIT 100
+    `);
+    res.json({ pending: rows });
+  } catch (err) {
+    console.error('[Admin KYC List Error]', err.message);
+    res.status(500).json({ error: 'Failed to load pending KYC' });
+  }
+});
+
+// ========== 7. KYC ADMIN: APPROVE ID ==========
+router.post('/kyc/approve', requireAdmin, async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ error: 'Missing userId' });
+
+    const result = await db4.query(`
+      UPDATE profiles
+      SET id_verified = true, id_status = 'APPROVED', id_verified_at = NOW(), id_photo_temp = NULL
+      WHERE user_id = $1 AND id_status = 'PENDING'
+      RETURNING user_id
+    `, [userId]);
+
+    if (result.rowCount === 0) return res.status(404).json({ error: 'No pending ID found for this user' });
+
+    await sendNotification(userId, 'KYC', 'ID Verified ✅', 'Your ID has been approved. You can now withdraw.');
+    console.log(`[ADMIN KYC] Approved ${userId}`);
+    res.json({ success: true, message: 'ID Approved' });
+  } catch (err) {
+    console.error('[Admin KYC Approve Error]', err.message);
+    res.status(500).json({ error: 'Failed to approve ID' });
+  }
+});
+
+// ========== 8. KYC ADMIN: REJECT ID ==========
+router.post('/kyc/reject', requireAdmin, async (req, res) => {
+  try {
+    const { userId, reason } = req.body;
+    if (!userId) return res.status(400).json({ error: 'Missing userId' });
+
+    const result = await db4.query(`
+      UPDATE profiles
+      SET id_status = 'REJECTED', id_photo_temp = NULL
+      WHERE user_id = $1 AND id_status = 'PENDING'
+      RETURNING user_id
+    `, [userId]);
+
+    if (result.rowCount === 0) return res.status(404).json({ error: 'No pending ID found for this user' });
+
+    await sendNotification(userId, 'KYC', 'ID Rejected ❌', `Reason: ${reason || 'Document unclear'}`);
+    console.log(`[ADMIN KYC] Rejected ${userId}: ${reason}`);
+    res.json({ success: true, message: 'ID Rejected' });
+  } catch (err) {
+    console.error('[Admin KYC Reject Error]', err.message);
+    res.status(500).json({ error: 'Failed to reject ID' });
+  }
+});
+
 module.exports = router;
+
