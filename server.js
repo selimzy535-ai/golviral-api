@@ -1759,11 +1759,12 @@ module.exports = {
 // ========== CHORE SYSTEM SCHEDULER CRON SERVICES ==========
 
 // 1. Cron Buffer Ingestion Engine (Every 10 seconds)
-cron.schedule('*/10 * * * * *', async () => {
+cron.schedule('*/30 * * * *', async () => {
   if (interactionBuffer.length === 0) return;
 
   const batch = [...interactionBuffer];
   interactionBuffer = [];
+
 
   const failedItems = [];
   const MILESTONES = [100, 1000, 10000, 100000];
