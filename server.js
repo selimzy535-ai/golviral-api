@@ -1269,31 +1269,35 @@ res.json({
 });
 
 app.post('/api/follow', authenticateToken, async (req, res) => {
-  const followerId = req.user.userId;
+  const followerId = req.userId;
   const { followingId } = req.body;
   if (followerId === followingId) return res.status(400).json({ error: 'Cannot follow yourself' });
 
   const db = getDbShard(followingId);
 
   try {
+    // Check first instead of relying on catch
+    const exists = await db.client.follow.findUnique({
+      where: { followerId_followingId: { followerId, followingId } }
+    });
+    if(exists) return res.status(400).json({ error: 'Already following' });
+
     await db.client.follow.create({ data: { followerId, followingId } });
-    const followerDb = getDbShard(followerId); 
-    const followerUser = await followerDb.client.user.findUnique({ 
+    
+    const followerUser = await getDbShard(followerId).client.user.findUnique({ 
       where: { id: followerId }, 
       select: { username: true } 
     }); 
-    
     if (followerUser) { 
-      sendNotification( 
-        followingId, 
-        'FOLLOW', 
-        'New Follower', 
-        `${followerUser.username} started following you` 
-      ); 
+      sendNotification(followingId, 'FOLLOW', 'New Follower', `${followerUser.username} started following you`); 
     }
+    
     res.json({ success: true });
+
   } catch (e) {
-    res.status(400).json({ error: 'Already following' });
+    console.error('[Follow Error]', e.code, e.message); // log real error
+    if(e.code === 'P2002') return res.status(400).json({ error: 'Already following' });
+    res.status(500).json({ error: 'Database error, try again' }); // don't lie
   }
 });
 
