@@ -389,8 +389,14 @@ app.post('/api/auth/signup', async (req, res) => {
       return res.status(400).json({ error: 'Math verification failed or expired session' });
     }
 
-    const existing = await findUserAcrossShards('email', email);
-    if (existing) return res.status(400).json({ error: 'Email registration matching conflict across shards' });
+    const emailNorm = email.toLowerCase().trim();
+    const usernameNorm = username.toLowerCase().trim();
+
+    const existingEmail = await findUserAcrossShards('email', emailNorm);
+    if (existingEmail) return res.status(400).json({ error: 'This email is already registered' });
+
+    const existingUsername = await findUserAcrossShards('username', usernameNorm);
+    if (existingUsername) return res.status(400).json({ error: 'This username is already taken' });
 
     const hashed = await bcrypt.hash(password, 12);
     const userId = crypto.randomBytes(8).toString('hex');
@@ -399,13 +405,16 @@ app.post('/api/auth/signup', async (req, res) => {
     await db.client.user.create({
       data: {
         id: userId,
-        username,
-        email,
+        username: usernameNorm,
+        email: emailNorm,
         password: hashed,
+        role: "user", // from your schema default
         freeCredits: 1500,
         cashBalance: 0,
-        monetizeFlag: false,
-        freeFarmingStopped: false
+        monetizeFlag: false,           // ADDED BACK
+        freeFarmingStopped: false,     // ADDED BACK
+        isVerified: false,
+        dmUnlocked: false
       }
     });
 
@@ -418,9 +427,13 @@ app.post('/api/auth/signup', async (req, res) => {
       }
     }
 
-    const token = jwt.sign({ userId, username }, JWT_SECRET, { expiresIn: '30d' });
+    const token = jwt.sign({ userId, username: usernameNorm }, JWT_SECRET, { expiresIn: '30d' });
     res.status(201).json({ token, userId, profileLink: `${APP_BASE_URL}/u/${userId}` });
   } catch (err) {
+    if (err.code === 'P2002') {
+      return res.status(400).json({ error: 'Email or Username already exists' });
+    }
+    console.error(err);
     res.status(500).json({ error: 'Registration framework failure caught' });
   }
 });
