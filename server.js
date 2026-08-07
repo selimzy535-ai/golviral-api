@@ -1268,79 +1268,102 @@ res.json({
   }
 });
 
+
 app.post('/api/follow', authenticateToken, async (req, res) => {
-  const followerId = req.userId; // FIX: was req.userId
+  const followerId = req.user.userId; // Standardized to req.user.userId
   const { followingId } = req.body;
-  if (followerId === followingId) return res.status(400).json({ error: 'Cannot follow yourself' });
+
+  if (followerId === followingId) {
+    return res.status(400).json({ error: 'Cannot follow yourself' });
+  }
 
   const targetDb = getDbShard(followingId);
   const followerDb = getDbShard(followerId);
   const allDbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
 
   try {
-    // 1. CHECK ALL 3 SHARDS FIRST
-    for(const db of allDbs){
-      const rel = await db.follow.findUnique({
-        where: { followerId_followingId: { followerId, followingId } }
-      }).catch(() => null);
-      if(rel) return res.status(400).json({ error: 'Already following' });
+    // 1. CHECK ALL SHARDS IN PARALLEL
+    const existingChecks = await Promise.all(
+      allDbs.map(db => 
+        db.follow.findUnique({
+          where: { followerId_followingId: { followerId, followingId } }
+        }).catch(() => null)
+      )
+    );
+
+    if (existingChecks.some(rel => rel !== null)) {
+      return res.status(400).json({ error: 'Already following' });
     }
 
-    // 2. CREATE IN BOTH SHARDS
-    await Promise.all([
-      targetDb.client.follow.create({ data: { followerId, followingId } }),
-      followerDb.client.follow.create({ data: { followerId, followingId } })
-    ]);
+    // 2. CREATE IN SHARDS (Avoid duplicate write if both users are on the same shard)
+    const createPromises = [
+      targetDb.follow.create({ data: { followerId, followingId } })
+    ];
+    if (targetDb !== followerDb) {
+      createPromises.push(followerDb.follow.create({ data: { followerId, followingId } }));
+    }
+    await Promise.all(createPromises);
 
     // 3. INCREMENT COUNTS
     await Promise.all([
-      targetDb.client.user.update({ where:{id:followingId}, data:{followers:{increment:1}} }),
-      followerDb.client.user.update({ where:{id:followerId}, data:{following:{increment:1}} })
+      targetDb.user.update({ where: { id: followingId }, data: { followers: { increment: 1 } } }),
+      followerDb.user.update({ where: { id: followerId }, data: { following: { increment: 1 } } })
     ]);
 
     // 4. NOTIFICATION
-    const followerUser = await followerDb.client.user.findUnique({ 
-      where: { id: followerId }, 
-      select: { username: true } 
-    }); 
-    if (followerUser) { 
-      sendNotification(followingId, 'FOLLOW', 'New Follower', `${followerUser.username} started following you`); 
+    const followerUser = await followerDb.user.findUnique({
+      where: { id: followerId },
+      select: { username: true }
+    });
+
+    if (followerUser) {
+      sendNotification(
+        followingId,
+        'FOLLOW',
+        'New Follower',
+        `${followerUser.username} started following you`
+      );
     }
-    
+
     res.json({ success: true });
 
   } catch (e) {
-    if(e.code === 'P2002') return res.status(400).json({ error: 'Already following' });
+    if (e.code === 'P2002') return res.status(400).json({ error: 'Already following' });
     console.error('[Follow Error]', e);
     res.status(500).json({ error: 'Follow failed' });
   }
-}); go
+});
 
 app.post('/api/unfollow', authenticateToken, async (req, res) => {
-  const followerId = req.user.userId; // FIX: was req.userId
+  const followerId = req.user.userId; // Standardized to req.user.userId
   const { followingId } = req.body;
   const allDbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
 
   try {
-    // DELETE FROM ALL SHARDS
-    await Promise.all(allDbs.map(db => 
-      db.follow.deleteMany({ where: { followerId, followingId } }).catch(()=>{})
-    ));
-    
-    // DECREMENT COUNTS
+    // 1. DELETE FROM ALL SHARDS
+    await Promise.all(
+      allDbs.map(db =>
+        db.follow.deleteMany({ where: { followerId, followingId } }).catch(() => {})
+      )
+    );
+
+    // 2. DECREMENT COUNTS
     const targetDb = getDbShard(followingId);
     const followerDb = getDbShard(followerId);
+
     await Promise.all([
-      targetDb.client.user.update({ where:{id:followingId}, data:{followers:{decrement:1}} }).catch(()=>{}),
-      followerDb.client.user.update({ where:{id:followerId}, data:{following:{decrement:1}} }).catch(()=>{})
+      targetDb.user.update({ where: { id: followingId }, data: { followers: { decrement: 1 } } }).catch(() => {}),
+      followerDb.user.update({ where: { id: followerId }, data: { following: { decrement: 1 } } }).catch(() => {})
     ]);
-    
+
     res.json({ success: true });
   } catch (e) {
     console.error('[Unfollow Error]', e);
     res.status(500).json({ error: 'Unfollow failed' });
   }
 });
+
+
 
 
 
