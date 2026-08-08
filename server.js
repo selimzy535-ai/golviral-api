@@ -1305,17 +1305,6 @@ app.post('/api/unfollow', authenticateToken, async (req, res) => {
   await db.client.follow.deleteMany({ where: { followerId, followingId } });
   res.json({ success: true });
 });
-    
-    // 2. DECREMENT COUNTS
-    await targetShard.client.user.update({ where: { id: followingId }, data: { followers: { decrement: 1 } } }).catch(() => {});
-    await followerShard.client.user.update({ where: { id: followerId }, data: { following: { decrement: 1 } } }).catch(() => {});
-    
-    res.json({ success: true });
-  } catch (e) {
-    console.error('[Unfollow Error]', e);
-    res.status(500).json({ error: 'Unfollow failed' });
-  }
-});
 
 // ========== V5.2 WITHDRAWAL GATEWAY WITH KYC ==========
 app.post('/api/wallet/withdraw', authenticateToken, requireFaceVerified, requireIdVerified, async (req, res) => {
