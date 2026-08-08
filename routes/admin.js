@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
+const crypto = require('crypto'); // for better sharding
 const { Pool } = require('pg');
 
 // ========== KILL CIRCULAR DEPENDENCY: MAKE OWN DB ==========
@@ -11,15 +12,30 @@ const dbUrls = [
   process.env.DATABASEURL3
 ];
 
+// NO FALLBACKS. Crash if env missing
 const prismaClients = {
-  db1: new PrismaClient({ datasources: { db: { url: dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db1" } } }),
-  db2: new PrismaClient({ datasources: { db: { url: dbUrls[1] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db2" } } }),
-  db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] || dbUrls[0] || "postgresql://mock:fallback@127.0.0.1:5432/db3" } } }),
+  db1: new PrismaClient({ datasources: { db: { url: dbUrls[0] } } }),
+  db2: new PrismaClient({ datasources: { db: { url: dbUrls[1] } } }),
+  db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] } } }),
 };
 
 Object.entries(prismaClients).forEach(([name, client]) => {
   client.$connect().catch((err) => console.error(`[Admin Prisma] Shard ${name} offline.`, err.message));
 });
+
+// ========== NEW SHARD HELPERS ==========
+function getShardIndex(id) {
+  if (!id) return 0;
+  // Use same logic your app uses. If you switched to md5, change this too
+  const hash = crypto.createHash('md5').update(String(id)).digest('hex');
+  return parseInt(hash.substring(0, 8), 16) % 3;
+}
+
+function getDbShard(userId) {
+  const idx = getShardIndex(userId);
+  const names = ['db1', 'db2', 'db3'];
+  return { client: prismaClients[names[idx]], name: names[idx], idx };
+}
 
 // ========== DB4 = KYC DB = RAW SQL ==========
 const db4 = new Pool({
@@ -31,7 +47,6 @@ db4.on('error', (err) => console.error('[Admin DB4 Error]', err.message));
 // ========== LOCAL NOTIF HELPER TO KILL CIRCULAR DEPENDENCY ==========
 async function sendNotification(userId, type, title, body, data = {}) {
   console.log(`[ADMIN NOTIF] ${type} -> ${userId}: ${title} | ${body}`);
-  // Hook this to your real notification service later
 }
 
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
@@ -39,21 +54,18 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY;
 
 // ========== COPIED HELPERS TO KILL CIRCLE ==========
 async function findPostAcrossShards(id) {
-  const dbs = [{ client: prismaClients.db1 }, { client: prismaClients.db2 }, { client: prismaClients.db3 }];
+  const dbs = [
+    { client: prismaClients.db1, name: 'db1' },
+    { client: prismaClients.db2, name: 'db2' },
+    { client: prismaClients.db3, name: 'db3' }
+  ];
   for (const db of dbs) {
     try {
       const post = await db.client.post.findUnique({ where: { id } });
-      if (post) return { post, db: db.client };
+      if (post) return { post, db: db.client, shard: db.name };
     } catch (err) {}
   }
   return null;
-}
-
-function getDbShard(userId) {
-  const idx = parseInt(userId, 36) % 3;
-  if (idx === 1) return { client: prismaClients.db2 };
-  if (idx === 2) return { client: prismaClients.db3 };
-  return { client: prismaClients.db1 };
 }
 
 function requireAdmin(req, res, next) {
@@ -87,10 +99,16 @@ router.post('/users/manage', requireAdmin, async (req, res) => {
     if (!action) return res.status(400).json({ error: 'Missing action field' });
     console.log(`[ADMIN ACTION] Admin:${adminId} Action:${action} Target:${userId || 'N/A'}`);
 
-    const dbs = [{ client: prismaClients.db1 }, { client: prismaClients.db2 }, { client: prismaClients.db3 }];
+    const dbs = [
+      { client: prismaClients.db1, name: 'db1' },
+      { client: prismaClients.db2, name: 'db2' },
+      { client: prismaClients.db3, name: 'db3' }
+    ];
 
     if (action === 'list') {
       const allUsers = [];
+      const totals = { db1: 0, db2: 0, db3: 0 };
+
       for (const db of dbs) {
         const users = await db.client.user.findMany({
           where: search ? {
@@ -108,23 +126,32 @@ router.post('/users/manage', requireAdmin, async (req, res) => {
           take: Number(limit) * 3
         }).catch(() => []);
 
+        totals[db.name] = users.length;
+
         for (const u of users) {
           let followers = 0;
           for (const shard of dbs) {
             followers += await shard.client.follow.count({ where: { followingId: u.id } }).catch(() => 0);
           }
-          allUsers.push({ ...u, followers });
+          allUsers.push({ ...u, followers, shard: db.name }); // <-- TAG THE SHARD
         }
       }
+
       allUsers.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       const start = (Number(page) - 1) * Number(limit);
-      return res.json({ users: allUsers.slice(start, start + Number(limit)), total: allUsers.length });
+      const paginated = allUsers.slice(start, start + Number(limit));
+
+      return res.json({
+        users: paginated,
+        total: allUsers.length,
+        totals // <-- { db1: 123, db2: 45, db3: 67 }
+      });
     }
 
     if (!userId) return res.status(400).json({ error: 'Missing userId for this action' });
     const db = getDbShard(userId);
     const targetUser = await db.client.user.findUnique({ where: { id: userId } });
-    if (!targetUser) return res.status(404).json({ error: 'User not found on any shard' });
+    if (!targetUser) return res.status(404).json({ error: `User not found on ${db.name}` });
 
     if (action === 'delete') {
       if (userId === adminId) return res.status(400).json({ error: 'Cannot delete yourself' });
@@ -140,17 +167,17 @@ router.post('/users/manage', requireAdmin, async (req, res) => {
         db.client.pushSubscription.deleteMany({ where: { userId } }),
         db.client.user.delete({ where: { id: userId } })
       ]);
-      return res.json({ success: true, message: `User ${targetUser.username} deleted` });
+      return res.json({ success: true, message: `User ${targetUser.username} deleted from ${db.name}` });
     }
 
     if (action === 'monetize') {
       await db.client.user.update({ where: { id: userId }, data: { monetizeFlag: true, freeFarmingStopped: true } });
-      return res.json({ success: true, message: `User ${targetUser.username} is now monetized` });
+      return res.json({ success: true, message: `User ${targetUser.username} is now monetized on ${db.name}` });
     }
 
     if (action === 'unmonetize') {
       await db.client.user.update({ where: { id: userId }, data: { monetizeFlag: false, freeFarmingStopped: false } });
-      return res.json({ success: true, message: `User ${targetUser.username} monetization removed` });
+      return res.json({ success: true, message: `User ${targetUser.username} monetization removed from ${db.name}` });
     }
 
     return res.status(400).json({ error: 'Invalid action. Use: list, delete, monetize, unmonetize' });
@@ -189,7 +216,7 @@ router.post('/posts/:id/approve', requireAdmin, async (req, res) => {
   const target = await findPostAcrossShards(id);
   if (!target) return res.status(404).json({ error: 'Post not found across infrastructure shards' });
   await target.db.post.update({ where: { id }, data: { status: 'ACTIVE' } });
-  res.json({ success: true });
+  res.json({ success: true, shard: target.shard });
 });
 
 router.post('/posts/:id/reject', requireAdmin, async (req, res) => {
@@ -204,7 +231,7 @@ router.post('/posts/:id/reject', requireAdmin, async (req, res) => {
   await userDb.client.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } });
   sendNotification(target.post.userId, 'POST', 'Post Rejected', `Your post was rejected. ${refundAmount} credits refunded`);
 
-  res.json({ success: true, refunded: refundAmount });
+  res.json({ success: true, refunded: refundAmount, shard: target.shard });
 });
 
 // ========== 4. PAYOUTS ==========
@@ -212,7 +239,7 @@ router.get('/payouts', requireAdmin, async (req, res) => {
   const all = [];
   for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
     await db.payoutQueue.findMany({ where: { status: 'PENDING' } })
-     .then(r => all.push(...r)).catch(() => {});
+      .then(r => all.push(...r)).catch(() => {});
   }
   res.json(all);
 });
@@ -227,7 +254,7 @@ router.post('/payouts/approve', requireAdmin, async (req, res) => {
     await db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'APPROVED' } });
     const amount = payout.amountPoints / 10;
     sendNotification(userId, 'WITHDRAW', 'Withdrawal Approved ✅', `Your ₦${amount} withdrawal is approved and processing`);
-    res.json({ success: true });
+    res.json({ success: true, shard: db.name });
   } catch (e) {
     console.error('[Payout Approve Error]', e.message);
     res.status(500).json({ error: 'Ledger tracking execution failed' });
@@ -246,7 +273,7 @@ router.post('/payouts/reject', requireAdmin, async (req, res) => {
       db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'REJECTED', reason } })
     ]);
     sendNotification(userId, 'WITHDRAW', 'Withdrawal Rejected ❌', `Reason: ${reason}`);
-    res.json({ success: true });
+    res.json({ success: true, shard: db.name });
   } catch (err) {
     console.error('[Payout Reject Error]', err.message);
     res.status(500).json({ error: 'Admin reversion system block handled execution fallback' });
@@ -280,7 +307,7 @@ router.post('/support/reply', requireAdmin, async (req, res) => {
       data: { reply: reply.trim(), status: 'RESOLVED' }
     });
     sendNotification(userId, 'SUPPORT', 'Support Reply', `Admin replied: ${reply.slice(0, 50)}`);
-    res.json({ success: true });
+    res.json({ success: true, shard: db.name });
   } catch (err) {
     res.status(500).json({ error: 'Failed to process admin support verification step' });
   }
@@ -352,4 +379,3 @@ router.post('/kyc/reject', requireAdmin, async (req, res) => {
 });
 
 module.exports = router;
-
