@@ -1268,58 +1268,52 @@ res.json({
   }
 });
 
-
-
 app.post('/api/follow', authenticateToken, async (req, res) => {
-  const followerId = req.userId;
+  const followerId = req.user?.userId || req.userId;
   const { followingId } = req.body;
 
   if (followerId === followingId) {
     return res.status(400).json({ error: 'Cannot follow yourself' });
   }
 
-  const targetShard = getDbShard(followingId); // {client, name}
-  const followerShard = getDbShard(followerId); // {client, name}
-  const targetDb = targetShard.client; 
-  const followerDb = followerShard.client;
+  const targetShard = getDbShard(followingId);
+  const followerShard = getDbShard(followerId);
+  const targetDb = targetShard.client || targetShard;
+  const followerDb = followerShard.client || followerShard;
+
   const allDbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
 
   try {
-    // 1. CHECK ALL SHARDS IN PARALLEL
+    // 1. CHECK ALL 3 SHARDS FIRST
     const existingChecks = await Promise.all(
-      allDbs.map(db => 
-        db.follow.findUnique({
+      allDbs.map(db => {
+        const client = db.client || db;
+        return client.follow.findUnique({
           where: { followerId_followingId: { followerId, followingId } }
-        }).catch(() => null)
-      )
+        }).catch(() => null);
+      })
     );
 
     if (existingChecks.some(rel => rel !== null)) {
       return res.status(400).json({ error: 'Already following' });
     }
 
-    // 2. CREATE IN SHARDS - avoid duplicate if same shard
+    // 2. CREATE IN SHARDS (Avoid duplicate write if users share a shard)
     const createPromises = [
       targetDb.follow.create({ data: { followerId, followingId } })
     ];
-    if (targetShard.name !== followerShard.name) { 
+    if (targetDb !== followerDb) {
       createPromises.push(followerDb.follow.create({ data: { followerId, followingId } }));
     }
     await Promise.all(createPromises);
 
-    // 3. INCREMENT COUNTS
-    const countPromises = [
-      targetDb.user.update({ where: { id: followingId }, data: { followers: { increment: 1 } } })
-    ];
-    if (targetShard.name !== followerShard.name) {
-      countPromises.push(followerDb.user.update({ where: { id: followerId }, data: { following: { increment: 1 } } }));
-    } else {
-      // same shard: update both fields in 1 query
-      countPromises.push(targetDb.user.update({ where: { id: followerId }, data: { following: { increment: 1 } } }));
-    }
-    await Promise.all(countPromises);
+    // 3. INCREMENT COUNTS IN BOTH SHARDS
+    await Promise.all([
+      targetDb.user.update({ where: { id: followingId }, data: { followers: { increment: 1 } } }),
+      followerDb.user.update({ where: { id: followerId }, data: { following: { increment: 1 } } })
+    ]);
 
-    // 4. NOTIFICATION
+    // 4. SEND NOTIFICATION
     const followerUser = await followerDb.user.findUnique({
       where: { id: followerId },
       select: { username: true }
@@ -1339,33 +1333,29 @@ app.post('/api/follow', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/unfollow', authenticateToken, async (req, res) => {
-  const followerId = req.userId; 
+  const followerId = req.user?.userId || req.userId;
   const { followingId } = req.body;
   const allDbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
 
   try {
-    // 1. DELETE FROM ALL SHARDS
+    // 1. DELETE FROM ALL 3 SHARDS
     await Promise.all(
-      allDbs.map(db =>
-        db.follow.deleteMany({ where: { followerId, followingId } }).catch(() => {})
-      )
+      allDbs.map(db => {
+        const client = db.client || db;
+        return client.follow.deleteMany({ where: { followerId, followingId } }).catch(() => {});
+      })
     );
 
-    // 2. DECREMENT COUNTS
+    // 2. DECREMENT COUNTS IN BOTH SHARDS
     const targetShard = getDbShard(followingId);
     const followerShard = getDbShard(followerId);
-    const targetDb = targetShard.client;
-    const followerDb = followerShard.client;
+    const targetDb = targetShard.client || targetShard;
+    const followerDb = followerShard.client || followerShard;
 
-    const countPromises = [
-      targetDb.user.update({ where: { id: followingId }, data: { followers: { decrement: 1 } } }).catch(() => {})
-    ];
-    if (targetShard.name !== followerShard.name) {
-      countPromises.push(followerDb.user.update({ where: { id: followerId }, data: { following: { decrement: 1 } } }).catch(() => {}));
-    } else {
-      countPromises.push(targetDb.user.update({ where: { id: followerId }, data: { following: { decrement: 1 } } }).catch(() => {}));
-    }
-    await Promise.all(countPromises);
+    await Promise.all([
+      targetDb.user.update({ where: { id: followingId }, data: { followers: { decrement: 1 } } }).catch(() => {}),
+      followerDb.user.update({ where: { id: followerId }, data: { following: { decrement: 1 } } }).catch(() => {})
+    ]);
 
     res.json({ success: true });
   } catch (e) {
@@ -1373,6 +1363,8 @@ app.post('/api/unfollow', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Unfollow failed' });
   }
 });
+
+
 
 // ========== V5.2 WITHDRAWAL GATEWAY WITH KYC ==========
 app.post('/api/wallet/withdraw', authenticateToken, requireFaceVerified, requireIdVerified, async (req, res) => {
