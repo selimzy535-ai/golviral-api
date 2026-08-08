@@ -49,9 +49,13 @@ const profilePool = new Pool({
 profilePool.on('error', (err) => console.error('[ProfileDB Error]', err.message));
 
 // ========== HELPERS ==========
+const crypto = require('crypto');
+
 function getShardIndex(id) {
   if (!id) return 0;
-  return parseInt(id, 36) % 3;
+  // MD5 hash the id, take first 8 chars, convert to int, then %3
+  const hash = crypto.createHash('md5').update(id).digest('hex');
+  return parseInt(hash.substring(0, 8), 16) % 3;
 }
 
 function getDbShard(userId) {
