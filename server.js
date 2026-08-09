@@ -1770,10 +1770,10 @@ module.exports = {
 };
 // ========== CHORE SYSTEM SCHEDULER CRON SERVICES ==========
 
-// 1. Cron Buffer Ingestion Engine (Every 10 seconds)
-cron.schedule('*/30 * * * *', async () => {
+// Runs every 30 seconds (6 fields)
+cron.schedule('*/30 * * * * *', async () => {
   if (interactionBuffer.length === 0) return;
-
+  
   const batch = [...interactionBuffer];
   interactionBuffer = [];
 
