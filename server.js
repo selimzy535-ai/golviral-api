@@ -143,6 +143,14 @@ async function findPostAcrossShards(id) {
   return null;
 }
 
+async function writeToAllShards(fn) {
+  await Promise.allSettled([
+    fn(prismaClients.db1).catch(()=>{}),
+    fn(prismaClients.db2).catch(()=>{}),
+    fn(prismaClients.db3).catch(()=>{})
+  ]);
+}
+
 async function getTotalFollowers(userId) {
   const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
   let total = 0;
@@ -1269,40 +1277,33 @@ res.json({
 });
 
 app.post('/api/follow', authenticateToken, async (req, res) => {
-  const followerId = req.user.userId;
+  const followerId = req.userId;
   const { followingId } = req.body;
   if (followerId === followingId) return res.status(400).json({ error: 'Cannot follow yourself' });
 
-  const db = getDbShard(followingId);
+  const target = await findUserAcrossShards('id', followingId);
+  if(!target) return res.status(404).json({error: 'User not found'});
 
-  try {
-    await db.client.follow.create({ data: { followerId, followingId } });
-    const followerDb = getDbShard(followerId); 
-    const followerUser = await followerDb.client.user.findUnique({ 
-      where: { id: followerId }, 
-      select: { username: true } 
-    }); 
-    
-    if (followerUser) { 
-      sendNotification( 
-        followingId, 
-        'FOLLOW', 
-        'New Follower', 
-        `${followerUser.username} started following you` 
-      ); 
-    }
-    res.json({ success: true });
-  } catch (e) {
-    res.status(400).json({ error: 'Already following' });
+  await writeToAllShards(db => 
+    db.follow.create({ data: { followerId, followingId } }).catch(()=>{})
+  );
+
+  const followerDb = getDbShard(followerId); 
+  const followerUser = await followerDb.client.user.findUnique({ where: { id: followerId } }); 
+  
+  if (followerUser) { 
+    sendNotification(followingId, 'FOLLOW', 'New Follower', `${followerUser.username} started following you`); 
   }
+  res.json({ success: true });
 });
 
 app.post('/api/unfollow', authenticateToken, async (req, res) => {
   const followerId = req.user.userId;
   const { followingId } = req.body;
-  const db = getDbShard(followingId);
 
-  await db.client.follow.deleteMany({ where: { followerId, followingId } });
+  await writeToAllShards(db => 
+    db.follow.deleteMany({ where: { followerId, followingId } }).catch(()=>{})
+  );
   res.json({ success: true });
 });
 
