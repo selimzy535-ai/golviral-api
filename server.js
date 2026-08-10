@@ -1,4 +1,3 @@
-
 // ========== 1. ALL IMPORTS & REQUIRES ==========
 const express = require('express');
 const http = require('http');
@@ -28,7 +27,7 @@ const { prismaClients, redisClients, getDbShard, getRedisShard, profilePool, pro
 const PORT = process.env.PORT || 10000;
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
 const APP_BASE_URL = process.env.APPBASEURL || 'https://selimzy535-ai.github.io/golviral-frontend';
-
+const { db5 } = require('./utils/db5');
 // CORS - Allow GitHub Pages + Custom Domain
 const allowedOrigins = [
   'https://selimzy535-ai.github.io',
@@ -129,38 +128,19 @@ async function findUserAcrossShards(field, value) {
 }
 
 async function findPostAcrossShards(id) {
-  const dbs = [
-    { client: prismaClients.db1, name: 'db1' },
-    { client: prismaClients.db2, name: 'db2' },
-    { client: prismaClients.db3, name: 'db3' }
-  ];
-  for (const db of dbs) {
-    try {
-      const post = await db.client.post.findUnique({ where: { id } });
-      if (post) return { post, db: db.client, name: db.name };
-    } catch (err) {
-      console.error(`[Shard Post Search Fail] ${db.name}: ${err.message}`);
-    }
-  }
-  return null;
+  const result = await db5.query(`SELECT * FROM posts WHERE id = $1 LIMIT 1`, [id]);
+  if (result.rows.length === 0) return null;
+  return { post: result.rows[0], db: db5, name: 'db5' };
 }
 
 async function getTotalFollowers(userId) {
-  const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
-  let total = 0;
-  for (const db of dbs) {
-    total += await db.follow.count({ where: { followingId: userId } }).catch(() => 0);
-  }
-  return total;
+  const result = await db5.query(`SELECT COUNT(*) FROM follows WHERE "followingId" = $1`, [userId]);
+  return parseInt(result.rows[0].count);
 }
 
 async function getTotalFollowing(userId) {
-  const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
-  let total = 0;
-  for (const db of dbs) {
-    total += await db.follow.count({ where: { followerId: userId } }).catch(() => 0);
-  }
-  return total;
+  const result = await db5.query(`SELECT COUNT(*) FROM follows WHERE "followerId" = $1`, [userId]);
+  return parseInt(result.rows[0].count);
 }
 
 // Dynamic Monetization Check Helper
@@ -713,11 +693,16 @@ app.post('/api/post/upload-video', authenticateToken, upload.single('video'), as
 });
 
 // ========== LIVE TRACKING & FEED PORTS ==========
-app.post('/api/view', (req, res) => {
-  const { postId, userId, viewerId, viewerIp } = req.body;
-  if (postId && userId) {
-    interactionBuffer.push({ type: 'VIEW', postId, userId, viewerId, viewerIp, timestamp: Date.now() });
-  }
+app.post('/api/like', authenticateToken, async (req, res) => {
+  const { postId, creatorId } = req.body;
+  const actorId = req.user.userId;
+  await db5.query(`
+    INSERT INTO likes(id, "postId", "userId", "creatorId")
+    VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING
+  `, [crypto.randomBytes(8).toString('hex'), postId, actorId, creatorId]);
+
+  await db5.query(`UPDATE posts SET likes = likes + 1 WHERE id = $1`, [postId]);
+  interactionBuffer.push({ type: 'LIKE', postId, userId: creatorId, actorId, timestamp: Date.now() });
   res.status(202).json({ buffered: true });
 });
 
@@ -732,26 +717,26 @@ app.post('/api/like', authenticateToken, (req, res) => {
 app.post('/api/comment', authenticateToken, async (req, res) => {
   try {
     const { postId, creatorId, text } = req.body;
-    const actorId = req.user.userId; 
-    if (!postId || !creatorId || !text || text.trim().length < 2) {
+    const actorId = req.user.userId;
+    if (!postId ||!creatorId ||!text || text.trim().length < 2) {
       return res.status(400).json({ error: 'Invalid comment payload' });
     }
 
     const redis = getRedisShard(actorId);
     const cooldown = await redis.get(`cool:comment:${actorId}`).catch(() => null);
     if (cooldown) return res.status(429).json({ error: 'Comment cooldown active' });
-
     await redis.set(`cool:comment:${actorId}`, '1', 'EX', 120).catch(() => {});
 
-    const db = getDbShard(creatorId);
-    await db.client.comment.create({
-      data: { postId, userId: actorId, text: text.trim().slice(0, 500) }
-    });
+    const commentId = crypto.randomBytes(8).toString('hex');
+    await db5.query(
+      `INSERT INTO comments(id, "postId", "userId", text) VALUES($1,$2,$3,$4)`,
+      [commentId, postId, actorId, text.trim().slice(0, 500)]
+    );
 
     const actorDb = getDbShard(actorId);
     const actorUser = await actorDb.client.user.findUnique({where:{id:actorId}});
     sendNotification(creatorId, 'COMMENT', 'New Comment', `${actorUser.username} commented: ${text.slice(0,40)}`);
-    
+
     interactionBuffer.push({ type: 'COMMENT', postId, userId: creatorId, actorId, timestamp: Date.now() });
     res.status(201).json({ success: true });
   } catch (err) {
@@ -1270,42 +1255,62 @@ res.json({
   }
 });
 
-app.post('/api/follow', authenticateToken, async (req, res) => {
-  const followerId = req.user.userId;
-  const { followingId } = req.body;
-  if (followerId === followingId) return res.status(400).json({ error: 'Cannot follow yourself' });
-
-  const db = getDbShard(followingId);
-
+app.post('/api/follow', authenticateToken, async (req, res) => { 
   try {
-    await db.client.follow.create({ data: { followerId, followingId } });
-    const followerDb = getDbShard(followerId); 
-    const followerUser = await followerDb.client.user.findUnique({ 
-      where: { id: followerId }, 
-      select: { username: true } 
-    }); 
-    
-    if (followerUser) { 
-      sendNotification( 
-        followingId, 
-        'FOLLOW', 
-        'New Follower', 
-        `${followerUser.username} started following you` 
-      ); 
+    const followerId = req.userId; 
+    const { followingId } = req.body; 
+
+    if (!followingId) return res.status(400).json({ error: 'followingId required' });
+    if (followerId === followingId) return res.status(400).json({ error: 'Cannot follow yourself' }); 
+
+    const target = await findUserAcrossShards('id', followingId); 
+    if(!target) return res.status(404).json({ error: 'User not found' }); 
+
+    const result = await db5.query(
+      `INSERT INTO follows("followerId", "followingId") VALUES($1,$2) ON CONFLICT DO NOTHING RETURNING *`, 
+      [followerId, followingId]
+    ); 
+
+    // Only send notification if it was actually inserted
+    if (result.rowCount > 0) {
+      const followerDb = getDbShard(followerId); 
+      const followerUser = await followerDb.client.user.findUnique({ where: { id: followerId } }); 
+      if (followerUser) { 
+        await sendNotification(followingId, 'FOLLOW', 'New Follower', `${followerUser.username} started following you`); 
+      } 
+      return res.status(201).json({ success: true, message: 'Followed' });
+    } else {
+      return res.status(200).json({ success: true, message: 'Already following' });
     }
-    res.json({ success: true });
-  } catch (e) {
-    res.status(400).json({ error: 'Already following' });
+
+  } catch (err) {
+    console.error('[Follow Error]', err);
+    res.status(500).json({ error: 'Follow failed' });
   }
-});
+}); 
 
-app.post('/api/unfollow', authenticateToken, async (req, res) => {
-  const followerId = req.user.userId;
-  const { followingId } = req.body;
-  const db = getDbShard(followingId);
+app.post('/api/unfollow', authenticateToken, async (req, res) => { 
+  try {
+    const followerId = req.userId; 
+    const { followingId } = req.body; 
 
-  await db.client.follow.deleteMany({ where: { followerId, followingId } });
-  res.json({ success: true });
+    if (!followingId) return res.status(400).json({ error: 'followingId required' });
+
+    const result = await db5.query(
+      `DELETE FROM follows WHERE "followerId"=$1 AND "followingId"=$2 RETURNING *`, 
+      [followerId, followingId]
+    ); 
+
+    if (result.rowCount > 0) {
+      return res.json({ success: true, message: 'Unfollowed' });
+    } else {
+      return res.json({ success: true, message: 'Was not following' });
+    }
+
+  } catch (err) {
+    console.error('[Unfollow Error]', err);
+    res.status(500).json({ error: 'Unfollow failed' });
+  }
 });
 // ========== V5.2 WITHDRAWAL GATEWAY WITH KYC ==========
 app.post('/api/wallet/withdraw', authenticateToken, requireFaceVerified, requireIdVerified, async (req, res) => {
