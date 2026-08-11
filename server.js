@@ -490,114 +490,93 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 });
 
+
 app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
   const { userId } = req.user;
   const { fileExtension, contentType, postType, caption, externalLink } = req.body;
 
-  const db = getDbShard(userId);
+  const userDb = getDbShard(userId); // ONLY for credits check
   const redis = getRedisShard(userId);
 
-  const lock = await redis.set(`lock:${userId}`, '1', 'EX', 2, 'NX').catch(() => 'PASS_BYPASS_LOCK');
-  if (!lock) return res.status(423).json({ error: 'Concurrency execution layer busy' });
+  const lock = await redis.set(`lock:${userId}`, '1', 'EX', 5, 'NX').catch(() => 'PASS_BYPASS_LOCK');
+  if (!lock) return res.status(423).json({ error: 'Please wait, processing previous request' });
 
   try {
-    const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
-    if (!user) return res.status(404).json({ error: 'User mapping vanished inside infrastructure arrays' });
+    // 1. Check credits in db1,2,3
+    const user = await userDb.client.user.findUnique({ where: { id: userId } });
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
     const fee = (postType === 'novel' || postType === 'story' || postType === 'store') ? 10 : 25;
     if (user.freeCredits < fee) return res.status(400).json({ error: `Insufficient points: Need ${fee} credits` });
 
-    // ===== TESTING LIMIT: 15 per day per type =====
+    // 2. Daily limit check - NOW CHECK db5
     const startOfToday = new Date();
-    startOfToday.setHours(0,0,0,0);
-    const countToday = await db.client.post.count({
-      where: {
-        userId,
-        type: postType,
-        createdAt: { gte: startOfToday }
-      }
-    });
+    startOfToday.setHours(0, 0, 0, 0);
+    const { rows: countRows } = await db5.query(
+      `SELECT COUNT(*) FROM posts WHERE "userId"=$1 AND type=$2 AND "createdAt" >= $3`,
+      [userId, postType, startOfToday]
+    );
+    const countToday = parseInt(countRows[0]?.count || 0, 10);
     const DAILY_LIMIT = 15;
     if (countToday >= DAILY_LIMIT) {
       return res.status(429).json({ error: `Daily ${postType} limit reached: ${DAILY_LIMIT}` });
     }
-    // ===== END TESTING LIMIT =====
 
-    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { decrement: fee } } });
+    // 3. Deduct credits (FIXED BRACKETS)
+    await userDb.client.user.update({
+      where: { id: userId },
+      data: { freeCredits: { decrement: fee } }
+    });
 
+    // 4. Generate B2 key + presigned URL
     const postId = crypto.randomBytes(8).toString('hex');
     const b2 = getB2Shard(userId);
+    const shardIndex = getShardIndex(userId);
 
-    // ===== FILE TYPE LOGIC =====
-    let allowedTypes = [];
-    let folder = 'media';
     let key = '';
-    let presignedUrl = "";
-    
-    if (postType === 'story' || postType === 'store') {
-      // STORY: IMAGE ONLY + TEXT
-      allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-      folder = 'story';
+    let presignedUrl = '';
 
-      if (!contentType) { // Text only story, no file upload
+    if (postType === 'story' || postType === 'store') {
+      const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+      if (!contentType) { // Text only story
         key = '';
-        presignedUrl = '';
       } else {
-        if (!allowedTypes.includes(contentType)) {
-          return res.status(400).json({ error: `Story only accepts images. Got: ${contentType}` });
-        }
+        if (!allowedTypes.includes(contentType)) return res.status(400).json({ error: `Story only accepts images` });
         let ext = fileExtension || 'jpg';
         if (contentType.includes('png')) ext = 'png';
         if (contentType.includes('webp')) ext = 'webp';
         if (contentType.includes('gif')) ext = 'gif';
-        key = `${folder}/${postId}.${ext}`;
-        
+        key = `story/${postId}.${ext}`;
         const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: contentType });
         presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
       }
 
     } else if (postType === 'reel') {
-      // REEL: VIDEO ONLY
-      allowedTypes = ['video/mp4', 'video/quicktime', 'video/mov'];
-      folder = 'media';
-      if (!allowedTypes.includes(contentType)) {
-        return res.status(400).json({ error: `Reel only accepts video. Got: ${contentType}` });
-      }
+      const allowedTypes = ['video/mp4', 'video/quicktime', 'video/mov'];
+      if (!allowedTypes.includes(contentType)) return res.status(400).json({ error: `Reel only accepts video` });
       let ext = fileExtension || 'mp4';
       if (contentType.includes('quicktime')) ext = 'mov';
-      key = `${folder}/${postId}.${ext}`;
-      
+      key = `media/${postId}.${ext}`;
       const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: contentType });
       presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
 
     } else {
       // NOVEL: TEXT ONLY
       key = '';
-      presignedUrl = '';
     }
-    // ===== END FILE TYPE LOGIC =====
 
-    await db.client.post.create({
-      data: { 
-        id: postId, 
-        userId, 
-        type: postType || 'reel', 
-        mediaUrl: key, // will be '' for text
-        thumbnailUrl: '', 
-        status: 'PRE_UPLOAD', 
-        b2Shard: getShardIndex(userId),
-        caption: caption || '',
-        externalLink: externalLink || '',
-        isBoosted: false
-      }
-    });
+    // 5. CRITICAL: INSERT INTO db5, NOT prisma
+    await db5.query(`
+      INSERT INTO posts(id, "userId", type, "mediaUrl", status, "b2Shard", caption, "externalLink", likes, comments, views, score)
+      VALUES($1,$2,$3,$4,'PRE_UPLOAD',$5,$6,$7,0,0,0,0)
+    `, [postId, userId, postType, key, shardIndex, caption || '', externalLink || '']);
 
-    console.log(`[INTENT OK] user:${userId} type:${postType} key:${key}`);
+    console.log(`[INTENT OK] user:${userId} type:${postType} postId:${postId}`);
     res.json({ postId, uploadUrl: presignedUrl, objectKey: key });
 
   } catch (err) {
     console.error('[Intent Error]', err.message);
-    res.status(500).json({ error: 'Intent initialization exception caught' });
+    res.status(500).json({ error: 'Failed to create post intent' });
   } finally {
     await redis.del(`lock:${userId}`).catch(() => {});
   }
@@ -607,62 +586,50 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
   const { userId } = req.user;
   const { postId, objectKey, title, content } = req.body;
 
-  console.log(`[CREATE START] user:${userId} postId:${postId} type:? key:${objectKey}`);
-
-  const db = getDbShard(userId);
-  const b2 = getB2Shard(userId);
-
-  const post = await db.client.post.findUnique({ where: { id: postId } }).catch(() => null);
-  if (!post) {
-    console.error(`[CREATE FAIL] Post not found in DB: ${postId}`);
-    return res.status(404).json({ error: 'Target tracking missing' });
-  }
-  
-  console.log(`[CREATE INFO] Found post. type:${post.type} user:${post.userId}`);
-
-  // 1. TEXT POSTS: Novel, Story, Store. No B2 needed
-  if (post.type === 'novel' || post.type === 'story' || post.type === 'store') {
-    console.log(`[CREATE TEXT] Activating text post: ${postId}`);
-    try {
-      await db.client.post.update({
-        where: { id: postId },
-        data: { status: 'ACTIVE', title: title || '', content: content || '' }
-      });
-      console.log(`[CREATE SUCCESS] Text post live: ${postId}`);
-      return res.json({ message: 'Content compilation complete', postId });
-    } catch (err) {
-      console.error(`[CREATE TEXT ERROR] ${postId}`, err.message);
-      return res.status(500).json({ error: 'Failed to activate text post' });
-    }
-  }
-
-  // 2. VIDEO POSTS: Reel. SKIPPING FFMPEG + DOWNLOAD FOR TESTING
-  console.log(`[CREATE REEL] Skipping B2 download and FFmpeg. Activating directly.`);
+  console.log(`[CREATE START] user:${userId} postId:${postId}`);
 
   try {
-    await db.client.post.update({
-      where: { id: postId },
-      data: { 
-        status: 'ACTIVE', 
-        mediaUrl: objectKey, // "media/xxx.mp4"
-        thumbnailUrl: '' // No thumbnail for now
-      }
-    });
+    // 1. Find post in db5
+    const { rows } = await db5.query(`SELECT * FROM posts WHERE id=$1 AND "userId"=$2`, [postId, userId]);
+    const post = rows[0];
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    if (post.status !== 'PRE_UPLOAD') return res.status(400).json({ error: 'Post already processed' });
 
-    console.log(`[CREATE SUCCESS] Reel live: ${postId} url:${objectKey}`);
-    return res.json({ message: 'Content compilation complete', postId });
+    // 2. TEXT POSTS: Novel, Story, Store. No B2 needed
+    if (post.type === 'novel' || post.type === 'story' || post.type === 'store') {
+      await db5.query(`
+        UPDATE posts SET status='ACTIVE', title=$1, content=$2
+        WHERE id=$3
+      `, [title || '', content || '', postId]);
+
+      console.log(`[CREATE SUCCESS] Text post live: ${postId}`);
+      return res.json({ message: 'Content published', postId });
+    }
+
+    // 3. VIDEO POSTS: Reel. Activate directly. Thumbnail later
+    await db5.query(`
+      UPDATE posts SET status='ACTIVE', "mediaUrl"=$1, title=$2, content=$3
+      WHERE id=$4
+    `, [objectKey, title || '', content || '', postId]);
+
+    console.log(`[CREATE SUCCESS] Reel live: ${postId}`);
+    res.json({ message: 'Content published', postId });
 
   } catch (err) {
-    console.error(`[CREATE REEL ERROR] postId:${postId}`, err.message, err.stack);
-    
-    // Refund user and reject post
-    await db.client.post.update({ where: { id: postId }, data: { status: 'REJECTED' } }).catch(() => {});
-    await db.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: 25 } } }).catch(() => {});
-    
-    return res.status(400).json({ error: 'Video compliance failed. Points recovered.' });
+    console.error(`[CREATE ERROR] postId:${postId}`, err.message);
+
+    // Refund user and reject post (FIXED BRACKETS)
+    const userDb = getDbShard(userId);
+    await db5.query(`UPDATE posts SET status='REJECTED' WHERE id=$1`, [postId]).catch(() => {});
+    await userDb.client.user.update({
+      where: { id: userId },
+      data: { freeCredits: { increment: 25 } }
+    }).catch(() => {});
+
+    res.status(500).json({ error: 'Failed to publish post. Credits refunded.' });
   }
-  // No finally block needed because we removed temp files
 });
+
 
 // NEW: Proxy upload to B2. Bypasses github.io CORS + ISP block
 app.post('/api/post/upload-video', authenticateToken, upload.single('video'), async (req, res) => {
