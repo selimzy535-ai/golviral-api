@@ -693,6 +693,14 @@ app.post('/api/post/upload-video', authenticateToken, upload.single('video'), as
 });
 
 // ========== LIVE TRACKING & FEED PORTS ==========
+app.post('/api/view', (req, res) => {
+  const { postId, userId, viewerId, viewerIp } = req.body;
+  if (postId && userId) {
+    interactionBuffer.push({ type: 'VIEW', postId, userId, viewerId, viewerIp, timestamp: Date.now() });
+  }
+  res.status(202).json({ buffered: true });
+});
+
 app.post('/api/like', authenticateToken, async (req, res) => {
   const { postId, creatorId } = req.body;
   const actorId = req.user.userId;
@@ -703,14 +711,6 @@ app.post('/api/like', authenticateToken, async (req, res) => {
 
   await db5.query(`UPDATE posts SET likes = likes + 1 WHERE id = $1`, [postId]);
   interactionBuffer.push({ type: 'LIKE', postId, userId: creatorId, actorId, timestamp: Date.now() });
-  res.status(202).json({ buffered: true });
-});
-
-app.post('/api/like', authenticateToken, (req, res) => {
-  const { postId, creatorId } = req.body;
-  if (postId && creatorId) {
-    interactionBuffer.push({ type: 'LIKE', postId, userId: creatorId, actorId: req.user.userId, timestamp: Date.now() });
-  }
   res.status(202).json({ buffered: true });
 });
 
