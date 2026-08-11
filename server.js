@@ -715,34 +715,37 @@ app.post('/api/comment', authenticateToken, async (req, res) => {
 app.get('/api/comments/:postId', async (req, res) => {
   try {
     const { postId } = req.params;
-    const { page = 1, limit = 20 } = req.query;
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
 
-    const target = await findPostAcrossShards(postId);
-    if (!target) return res.status(404).json({ error: 'Post not found' });
+    // 1. Check post exists in db5
+    const { rows: postRows } = await db5.query(`SELECT id FROM posts WHERE id=$1`, [postId]);
+    if (postRows.length === 0) return res.status(404).json({ error: 'Post not found' });
 
-    const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
-    let allComments = [];
+    // 2. Get comments from db5 with pagination
+    const { rows: comments } = await db5.query(`
+      SELECT id, "userId", text, "createdAt"
+      FROM comments
+      WHERE "postId"=$1
+      ORDER BY "createdAt" DESC
+      LIMIT $2 OFFSET $3
+    `, [postId, limit, offset]);
 
-    // 1. Get comments from all 3 shards
-    for(const db of dbs){
-      try {
-        const comments = await db.comment.findMany({
-          where: { postId },
-          select: { id: true, text: true, createdAt: true, userId: true },
-          orderBy: { createdAt: 'desc' },
-          take: 100
-        });
-        allComments.push(...comments);
-      } catch(e){ console.error('[Comment Shard Error]', e.message) }
-    }
-    
-    // 2. Sort globally and paginate
-    allComments.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
-    const paginated = allComments.slice((Number(page) - 1) * Number(limit), Number(page) * Number(limit));
+    // 3. Get total count
+    const { rows: countRows } = await db5.query(
+      `SELECT COUNT(*) FROM comments WHERE "postId"=$1`,
+      [postId]
+    );
+    const total = parseInt(countRows[0].count || 0);
 
-    // 3. Get usernames from all shards
-    const userIds = [...new Set(paginated.map(c => c.userId))];
+    if (comments.length === 0) return res.json({ comments: [], total: 0 });
+
+    // 4. Get usernames from db1,2,3
+    const userIds = [...new Set(comments.map(c => c.userId))];
     let allUsers = [];
+    const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+
     for(const db of dbs){
       try {
         const users = await db.user.findMany({
@@ -754,14 +757,18 @@ app.get('/api/comments/:postId', async (req, res) => {
     }
     const userMap = new Map(allUsers.map(u => [u.id, u]));
 
-    // 4. Attach username
-    const finalComments = paginated.map(c => ({
-      ...c,
+    // 5. Attach username
+    const finalComments = comments.map(c => ({
+      id: c.id,
+      text: c.text,
+      createdAt: c.createdAt,
+      userId: c.userId,
       user: userMap.get(c.userId) || { id: c.userId, username: 'User' }
     }));
 
-    res.json({ comments: finalComments, total: allComments.length });
+    res.json({ comments: finalComments, total });
   } catch (err) {
+    console.error('[Get Comments Error]', err.message);
     res.status(500).json({ error: 'Failed to load comments' });
   }
 });
@@ -775,58 +782,27 @@ app.post('/api/read-session', authenticateToken, (req, res) => {
 });
 
 app.get('/api/feed', async (req, res) => {
-  const feed = [];
-  const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+  try {
+    const now = new Date().toISOString();
+    const { rows } = await db5.query(`
+      SELECT 
+        id, "userId", type, title, content, "mediaUrl", "b2Shard", caption,
+        likes, comments, views, score, "createdAt",
+        CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $1 THEN true ELSE false END as "isBoosted",
+        CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $1 THEN "externalLink" ELSE NULL END as "externalLink"
+      FROM posts 
+      WHERE status='ACTIVE'
+      ORDER BY 
+        CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $1 THEN 1 ELSE 0 END DESC, 
+        score DESC
+      LIMIT 30
+    `, [now]);
 
-  for (const db of targets) {
-    try {
-      const posts = await db.post.findMany({
-        where: { status: 'ACTIVE' },
-        select: {
-          id: true,
-          userId: true,
-          type: true,
-          title: true,
-          content: true,
-          mediaUrl: true,
-          b2Shard: true,
-          likes: true,
-          comments: true,
-          views: true,
-          score: true,
-          createdAt: true,
-          isBoosted: true,
-          boostExpiresAt: true,
-          externalLink: true,
-          caption: true
-        },
-        take: 24
-      });
-      
-      const processedPosts = posts.map(p => {
-        const currentlyBoosted = p.isBoosted && p.boostExpiresAt && new Date(p.boostExpiresAt) > new Date();
-        return {
-          ...p,
-          isBoosted: !!currentlyBoosted,
-          // Link only clickable if currently boosted
-          externalLink: currentlyBoosted ? p.externalLink : null
-        };
-      });
-
-      feed.push(...processedPosts);
-    } catch (dbErr) {
-      console.error('[Feed Shard Intercepted]', dbErr.message);
-    }
+    res.json(rows);
+  } catch(err) {
+    console.error('[Feed Error]', err.message);
+    res.status(500).json({ error: 'Failed to load feed' });
   }
-
-  // Sorting: Boosted posts first, then by score descending
-  feed.sort((a, b) => {
-    if (a.isBoosted && !b.isBoosted) return -1;
-    if (!a.isBoosted && b.isBoosted) return 1;
-    return b.score - a.score;
-  });
-
-  res.json(feed.slice(0, 30));
 });
 
 app.get('/api/post/:id', async (req, res) => {
@@ -1625,52 +1601,39 @@ async function sendNotification(userId, type, title, body, data = {}) {
 
 // ========== ENDPOINT 1: PROFILE POSTS ==========
 app.get('/api/user/:id/posts', async (req, res) => {
-  try {
-    const { id: targetId } = req.params;
-    const { page = 1, limit = 12 } = req.query;
-    const db = getDbShard(targetId);
-    
-    const posts = await db.client.post.findMany({
-      where: { userId: targetId, status: { in: ['ACTIVE', 'ARCHIVED'] } },
-      orderBy: { createdAt: 'desc' },
-      skip: (Number(page) - 1) * Number(limit),
-      take: Number(limit)
-    });
+  const { id: targetId } = req.params;
+  const { page = 1, limit = 12 } = req.query;
 
-    const processed = posts.map(p => ({
-      ...p,
-      mediaUrl: p.status === 'ARCHIVED' ? null : p.mediaUrl,
-      thumbnailUrl: p.status === 'ARCHIVED' ? null : p.thumbnailUrl
-    }));
-    res.json(processed);
-  } catch (err) { res.status(500).json({ error: 'Failed to load user posts' }); }
+  const { rows } = await db5.query(
+    `SELECT * FROM posts WHERE "userId"=$1 AND status IN ('ACTIVE','ARCHIVED') ORDER BY "createdAt" DESC LIMIT $2 OFFSET $3`,
+    [targetId, limit, (page-1)*limit]
+  );
+  res.json(rows);
 });
 
 // ========== ENDPOINT 2: EXPLORE ==========
 app.get('/api/explore', async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
-    const feed = [];
-    const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    
+    const { rows } = await db5.query(`
+      SELECT * FROM posts 
+      WHERE status='ACTIVE' 
+        AND type='reel' 
+        AND views >= 50 
+        AND "createdAt" >= $1
+      ORDER BY 
+        CASE WHEN "isBoosted" = true AND "boostExpiresAt" > NOW() THEN 1 ELSE 0 END DESC, 
+        score DESC
+      LIMIT $2 OFFSET $3
+    `, [sevenDaysAgo, limit, (page-1)*limit]);
 
-    for (const db of targets) {
-      const posts = await db.post.findMany({
-        where: { status: 'ACTIVE', type: 'reel', views: { gte: 50 }, createdAt: { gte: sevenDaysAgo } },
-        take: 30
-      }).catch(()=>[]);
-      feed.push(...posts);
-    }
-
-    feed.sort((a, b) => {
-      const aBoost = a.isBoosted && a.boostExpiresAt && new Date(a.boostExpiresAt) > new Date();
-      const bBoost = b.isBoosted && b.boostExpiresAt && new Date(b.boostExpiresAt) > new Date();
-      if (aBoost && !bBoost) return -1;
-      if (!aBoost && bBoost) return 1;
-      return b.score - a.score;
-    });
-    res.json(feed.slice((page-1)*limit, page*limit));
-  } catch (err) { res.status(500).json({ error: 'Failed to load explore' }); }
+    res.json(rows);
+  } catch (err) { 
+    console.error('[Explore Error]', err.message);
+    res.status(500).json({ error: 'Failed to load explore' }); 
+  }
 });
 
 // ========== ENDPOINT 3: SEARCH USERS ==========
