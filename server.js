@@ -54,7 +54,7 @@ app.use(express.json({ limit: '50mb' }));
 
 app.use(cors({ 
   origin: allowedOrigins, // use array directly, faster
-  credentials: false, // must be false with specific origins
+  credentials: true, // must be false with specific origins
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-key'] // ADDED
 }));
@@ -1027,13 +1027,11 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
       const expireDate = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000);
 
       const targetPost = await findPostAcrossShards(targetPostId);
-      if (targetPost) {
-        ops.push(
-          targetPost.db.post.update({
-            where: { id: targetPostId },
-            data: { isBoosted: true, boostExpiresAt: expireDate }
-          })
-        );
+      if (targetPost) 
+      {ops.push(
+      db5.query(`UPDATE posts SET "isBoosted"=true, "boostExpiresAt"=$1 WHERE id=$2`, [expireDate, targetPostId])
+      )
+       }
         resp.boosted = targetPostId;
         resp.expiresAt = expireDate;
       }
@@ -1600,15 +1598,29 @@ async function sendNotification(userId, type, title, body, data = {}) {
 }
 
 // ========== ENDPOINT 1: PROFILE POSTS ==========
-app.get('/api/user/:id/posts', async (req, res) => {
-  const { id: targetId } = req.params;
-  const { page = 1, limit = 12 } = req.query;
+app.get('/api/user/:id/posts', async (req, res) => { 
+  try {
+    const { id: targetId } = req.params; 
+    const { page = 1, limit = 12 } = req.query; 
+    
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.min(50, parseInt(limit) || 12); // cap at 50
+    const offset = (pageNum - 1) * limitNum;
 
-  const { rows } = await db5.query(
-    `SELECT * FROM posts WHERE "userId"=$1 AND status IN ('ACTIVE','ARCHIVED') ORDER BY "createdAt" DESC LIMIT $2 OFFSET $3`,
-    [targetId, limit, (page-1)*limit]
-  );
-  res.json(rows);
+    const { rows } = await db5.query(
+      `SELECT * FROM posts 
+       WHERE "userId"=$1 
+         AND status IN ('ACTIVE','ARCHIVED') 
+       ORDER BY "createdAt" DESC 
+       LIMIT $2 OFFSET $3`, 
+      [targetId, limitNum, offset] 
+    ); 
+
+    res.json(rows);
+  } catch(err) { 
+    console.error('[User Posts Error]', err.message);
+    res.status(500).json({error: 'Failed to load user posts'}) 
+  } 
 });
 
 // ========== ENDPOINT 2: EXPLORE ==========
