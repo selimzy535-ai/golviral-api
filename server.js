@@ -949,15 +949,18 @@ app.post('/api/boost/init', authenticateToken, async (req, res) => {
   }
 });
 
+
 app.post('/api/payment/verify', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
     const { tx_ref, token, passToken } = req.body;
 
-    if (!(await internalVerifyPassToken(passToken)))
+    if (!(await internalVerifyPassToken(passToken))) {
       return res.status(400).json({ error: 'Math verification failed' });
-    if (!tx_ref ||!token)
+    }
+    if (!tx_ref || !token) {
       return res.status(400).json({ error: 'Missing tx_ref or token' });
+    }
 
     const db = getDbShard(userId);
 
@@ -987,23 +990,23 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
     let resp = { success: true };
 
     // 3. Route based on meta type
-    if (deposit.meta === "DM_UNLOCK") {
+    if (deposit.meta === 'DM_UNLOCK') {
       ops.push(
         db.client.user.update({
           where: { id: userId },
           data: { isVerified: true, dmUnlocked: true }
         })
       );
-      resp.unlocked = "DM";
+      resp.unlocked = 'DM';
 
-    } else if (deposit.meta?.startsWith("GIFT_")) {
+    } else if (deposit.meta?.startsWith('GIFT_')) {
       const giftType = deposit.meta.split('_')[1];
       const pack = GIFT_PACKS[giftType];
-      if(!pack) return res.status(400).json({error:"Invalid gift"});
+      if (!pack) return res.status(400).json({ error: 'Invalid gift' });
 
       ops.push(
         db.client.gift.create({
-          data:{
+          data: {
             id: crypto.randomBytes(8).toString('hex'),
             buyerId: userId,
             giftType,
@@ -1011,30 +1014,30 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
             pointsPerGift: pack.points,
             giftsSent: 0,
             giftsTotal: pack.giftsTotal,
-            expiresAt: new Date(Date.now() + 30*24*60*60*1000)
+            expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
           }
         })
       );
       resp.gift = giftType;
 
-    } else if (deposit.meta?.startsWith("BOOST_")) {
+    } else if (deposit.meta?.startsWith('BOOST_')) {
       const parts = deposit.meta.split('_');
       const targetPostId = parts[1];
-      const tierAmount = parseInt(parts[2]);
+      const tierAmount = parseInt(parts[2], 10);
 
       const validTiers = { 3500: 1, 7500: 3, 17000: 7 };
       const durationDays = validTiers[tierAmount] || 1;
       const expireDate = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000);
 
       const targetPost = await findPostAcrossShards(targetPostId);
-      if (targetPost) 
-      {ops.push(
-      db5.query(`UPDATE posts SET "isBoosted"=true, "boostExpiresAt"=$1 WHERE id=$2`, [expireDate, targetPostId])
-      )
-       }
-        resp.boosted = targetPostId;
-        resp.expiresAt = expireDate;
+      if (targetPost) {
+        await db5.query(
+          `UPDATE posts SET "isBoosted"=true, "boostExpiresAt"=$1 WHERE id=$2`,
+          [expireDate, targetPostId]
+        );
       }
+      resp.boosted = targetPostId;
+      resp.expiresAt = expireDate;
 
     } else {
       // 4. DEFAULT: BUY POINTS. Use increment so retry is safe
@@ -1063,12 +1066,13 @@ app.post('/api/payment/verify', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('[Payment Verify Error]', err.message);
     // Handle race condition: 2 requests at same time
-    if(err.code === 'P2002') {
+    if (err.code === 'P2002') {
       return res.json({ success: true, message: 'Payment already processed' });
     }
     res.status(500).json({ error: 'Payment verification failed' });
   }
 });
+
 
 // ========== MEDIA SIGNING PORT ==========
 const bucketMap = {
