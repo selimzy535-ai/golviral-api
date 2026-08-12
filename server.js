@@ -1200,28 +1200,42 @@ res.json({
   }
 });
 
+
 app.post('/api/follow', authenticateToken, async (req, res) => { 
   try {
-    const followerId = req.userId; 
+    // 1. Safely extract followerId from req.user
+    const followerId = req.user?.userId || req.user?.id || req.userId; 
     const { followingId } = req.body; 
 
+    if (!followerId) return res.status(401).json({ error: 'Unauthorized user identity' });
     if (!followingId) return res.status(400).json({ error: 'followingId required' });
     if (followerId === followingId) return res.status(400).json({ error: 'Cannot follow yourself' }); 
 
+    // 2. Validate target user exists
     const target = await findUserAcrossShards('id', followingId); 
-    if(!target) return res.status(404).json({ error: 'User not found' }); 
+    if (!target) return res.status(404).json({ error: 'User not found' }); 
 
+    // 3. Insert into db5 follows table safely
     const result = await db5.query(
-      `INSERT INTO follows("followerId", "followingId") VALUES($1,$2) ON CONFLICT DO NOTHING RETURNING *`, 
+      `INSERT INTO follows ("followerId", "followingId") 
+       VALUES ($1, $2) 
+       ON CONFLICT ("followerId", "followingId") DO NOTHING 
+       RETURNING *`, 
       [followerId, followingId]
     ); 
 
-    // Only send notification if it was actually inserted
+    // 4. Send notification only if a new row was created
     if (result.rowCount > 0) {
       const followerDb = getDbShard(followerId); 
-      const followerUser = await followerDb.client.user.findUnique({ where: { id: followerId } }); 
+      const followerUser = await followerDb.client.user.findUnique({ where: { id: followerId } }).catch(() => null); 
+      
       if (followerUser) { 
-        await sendNotification(followingId, 'FOLLOW', 'New Follower', `${followerUser.username} started following you`); 
+        await sendNotification(
+          followingId, 
+          'FOLLOW', 
+          'New Follower', 
+          `${followerUser.username} started following you`
+        ).catch((err) => console.error('[Follow Notification Error]', err.message)); 
       } 
       return res.status(201).json({ success: true, message: 'Followed' });
     } else {
@@ -1229,18 +1243,21 @@ app.post('/api/follow', authenticateToken, async (req, res) => {
     }
 
   } catch (err) {
-    console.error('[Follow Error]', err);
+    console.error('[Follow Error]', err.message);
     res.status(500).json({ error: 'Follow failed' });
   }
 }); 
 
 app.post('/api/unfollow', authenticateToken, async (req, res) => { 
   try {
-    const followerId = req.userId; 
+    // 1. Safely extract followerId from req.user
+    const followerId = req.user?.userId || req.user?.id || req.userId; 
     const { followingId } = req.body; 
 
+    if (!followerId) return res.status(401).json({ error: 'Unauthorized user identity' });
     if (!followingId) return res.status(400).json({ error: 'followingId required' });
 
+    // 2. Remove follow relation from db5
     const result = await db5.query(
       `DELETE FROM follows WHERE "followerId"=$1 AND "followingId"=$2 RETURNING *`, 
       [followerId, followingId]
@@ -1253,10 +1270,12 @@ app.post('/api/unfollow', authenticateToken, async (req, res) => {
     }
 
   } catch (err) {
-    console.error('[Unfollow Error]', err);
+    console.error('[Unfollow Error]', err.message);
     res.status(500).json({ error: 'Unfollow failed' });
   }
 });
+
+
 // ========== V5.2 WITHDRAWAL GATEWAY WITH KYC ==========
 app.post('/api/wallet/withdraw', authenticateToken, requireFaceVerified, requireIdVerified, async (req, res) => {
   try {
