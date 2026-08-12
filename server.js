@@ -1734,7 +1734,7 @@ cron.schedule('*/30 * * * * *', async () => {
 
   for (const item of batch) {
     try {
-      const db = getDbShard(item.userId);
+      
 
       if (item.type === 'VIEW') {
         const redis = getRedisShard(item.userId);
@@ -1749,11 +1749,9 @@ cron.schedule('*/30 * * * * *', async () => {
             meta: { refId: item.postId } 
           });
           
-          const p = await db.client.post.update({ 
-            where: { id: item.postId }, 
-            data: { views: { increment: 1 } },
-            select: { views: true, userId: true, title: true, type: true }
-          }).catch(() => null);
+          await db5.query(`UPDATE posts SET views = views + 1 WHERE id=$1`, [item.postId]);
+          const { rows } = await db5.query(`SELECT views, "userId", title, type FROM posts WHERE id=$1`, [item.postId]);
+          const p = rows[0];
           
           if (p && MILESTONES.includes(p.views)) {
             const milestoneKey = `milestone:${item.postId}`;
@@ -1774,12 +1772,12 @@ cron.schedule('*/30 * * * * *', async () => {
       } else if (item.type === 'LIKE') {
         await processWalletTransaction({ userId: item.userId, action: 'LIKE', isCreator: true, meta: { refId: item.postId } });
         await processWalletTransaction({ userId: item.actorId, action: 'LIKE', isCreator: false, meta: { refId: item.postId } });
-        await db.client.post.update({ where: { id: item.postId }, data: { likes: { increment: 1 } } }).catch(() => {});
+        await db5.query(`UPDATE posts SET likes = likes + 1 WHERE id=$1`, [item.postId]);
 
       } else if (item.type === 'COMMENT') {
         await processWalletTransaction({ userId: item.userId, action: 'COMMENT', isCreator: true, meta: { refId: item.postId } });
         await processWalletTransaction({ userId: item.actorId, action: 'COMMENT', isCreator: false, meta: { refId: item.postId } });
-        await db.client.post.update({ where: { id: item.postId }, data: { comments: { increment: 1 } } }).catch(() => {});
+        await db5.query(`UPDATE posts SET comments = comments + 1 WHERE id=$1`, [item.postId]);
 
       } else if (item.type === 'READ') {
         const redis = getRedisShard(item.userId);
@@ -1846,65 +1844,76 @@ cron.schedule('*/5 * * * *', async () => {
 // 4. B2 Media Archive & Cleanup (Every Day at 3:00 AM)
 cron.schedule('0 3 * * *', async () => {
   const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
-  const clusters = [
-    { db: prismaClients.db1, b2: b2Clients.b2a, bucket: b2Config.a.bucket },
-    { db: prismaClients.db2, b2: b2Clients.b2b, bucket: b2Config.b.bucket },
-    { db: prismaClients.db3, b2: b2Clients.b2c, bucket: b2Config.c.bucket }
-  ];
-  for (const c of clusters) {
-    try {
-      const posts = await c.db.post.findMany({ 
-        where: { createdAt: { lt: cutoff }, status: 'ACTIVE', OR: [{ isBoosted: false }, { isBoosted: null }] } 
-      });
-      for (const p of posts) {
-        if (p.mediaUrl && !p.mediaUrl.startsWith('http')) {
-          await c.b2.send(new DeleteObjectCommand({ Bucket: c.bucket, Key: p.mediaUrl })).catch(() => {});
-          const thumbKey = p.mediaUrl.replace('media/', 'thumbs/').replace(/\.[^/.]+$/, ".jpg");
-          await c.b2.send(new DeleteObjectCommand({ Bucket: c.bucket, Key: thumbKey })).catch(() => {});
-        }
-        await c.db.post.update({ where: { id: p.id }, data: { status: 'ARCHIVED', mediaUrl: null, thumbnailUrl: null } }).catch(() => {});
+
+  // Map b2Shard index to client + bucket
+  const bucketMap = {
+    0: { client: b2Clients.b2a, bucket: b2Config.a.bucket },
+    1: { client: b2Clients.b2b, bucket: b2Config.b.bucket },
+    2: { client: b2Clients.b2c, bucket: b2Config.c.bucket }
+  };
+
+  try {
+    // 1. Get all old posts from db5
+    const { rows: posts } = await db5.query(`
+      SELECT id, "mediaUrl", "b2Shard" FROM posts
+      WHERE "createdAt" < $1 
+        AND status='ACTIVE' 
+        AND ("isBoosted"=false OR "isBoosted" IS NULL)
+    `, [cutoff]);
+
+    // 2. Delete from B2 and archive in db5
+    for (const p of posts) {
+      const b2 = bucketMap[p.b2Shard] || bucketMap[0]; // fallback to bucket A
+
+      if (p.mediaUrl && !p.mediaUrl.startsWith('http')) {
+        await b2.client.send(new DeleteObjectCommand({ Bucket: b2.bucket, Key: p.mediaUrl })).catch(() => {});
+
+        const thumbKey = p.mediaUrl.replace('media/', 'thumbs/').replace(/\.[^/.]+$/, '.jpg');
+        await b2.client.send(new DeleteObjectCommand({ Bucket: b2.bucket, Key: thumbKey })).catch(() => {});
       }
-    } catch (cronErr) { console.error('[B2 Cron Archive Exception]', cronErr.message); }
+
+      await db5.query(`
+        UPDATE posts 
+        SET status='ARCHIVED', "mediaUrl"=null, "thumbnailUrl"=null 
+        WHERE id=$1
+      `, [p.id]).catch(() => {});
+    }
+
+    if (posts.length > 0) {
+      console.log(`[B2 CRON] Archived ${posts.length} posts`);
+    }
+
+  } catch (cronErr) {
+    console.error('[B2 Cron Archive Exception]', cronErr.message);
   }
 });
 
 // 5. Score Recalculator Engine (Every 5 minutes)
 cron.schedule('*/5 * * * *', async () => {
-  const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
-  for (const db of targets) {
-    try {
-      const posts = await db.post.findMany({ where: { status: 'ACTIVE' } });
-      for (const p of posts) {
-        const hoursOld = (Date.now() - new Date(p.createdAt)) / 1000 / 3600;
-        const newScore = (p.likes * 2) + (p.comments * 3) + (p.views * 0.1) - (hoursOld * 0.5);
-        await db.post.update({ where: { id: p.id }, data: { score: newScore } });
-      }
-    } catch (e) {
-      console.error('[Score Cron Error]', e.message);
+  try {
+    const { rows: posts } = await db5.query(`SELECT id, likes, comments, views, "createdAt" FROM posts WHERE status='ACTIVE'`);
+    for (const p of posts) {
+      const hoursOld = (Date.now() - new Date(p.createdAt)) / 1000 / 3600;
+      const newScore = (p.likes * 2) + (p.comments * 3) + (p.views * 0.1) - (hoursOld * 0.5);
+      await db5.query(`UPDATE posts SET score=$1 WHERE id=$2`, [newScore, p.id]);
     }
+  } catch (e) {
+    console.error('[Score Cron Error]', e.message);
   }
 });
 
 // 6. Boost Expiration Cron System (Every 1 hour)
 cron.schedule('0 * * * *', async () => {
-  const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
-  for (const db of targets) {
-    try {
-      const expired = await db.post.updateMany({
-        where: {
-          isBoosted: true,
-          boostExpiresAt: { lt: new Date() }
-        },
-        data: {
-          isBoosted: false
-        }
-      });
-      if (expired.count > 0) {
-        console.log(`[Boost Engine] Expired ${expired.count} posts from matrix index.`);
-      }
-    } catch (err) {
-      console.error('[Boost Expiration Process Error]', err.message);
+  try {
+    const result = await db5.query(`
+      UPDATE posts SET "isBoosted"=false
+      WHERE "isBoosted"=true AND "boostExpiresAt" < NOW()
+    `);
+    if (result.rowCount > 0) {
+      console.log(`[Boost Engine] Expired ${result.rowCount} posts from matrix index.`);
     }
+  } catch (err) {
+    console.error('[Boost Expiration Process Error]', err.message);
   }
 });
 
