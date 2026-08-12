@@ -1721,49 +1721,51 @@ module.exports = {
 };
 // ========== CHORE SYSTEM SCHEDULER CRON SERVICES ==========
 
-// Runs every 30 seconds (6 fields)
+// 1. Interaction Buffer Batch Processor (Every 30 Seconds)
 cron.schedule('*/30 * * * * *', async () => {
   if (interactionBuffer.length === 0) return;
-  
+
   const batch = [...interactionBuffer];
   interactionBuffer = [];
-
 
   const failedItems = [];
   const MILESTONES = [100, 1000, 10000, 100000];
 
   for (const item of batch) {
     try {
-      
-
       if (item.type === 'VIEW') {
         const redis = getRedisShard(item.userId);
         const identity = item.viewerId || item.viewerIp || 'anonymous_ip';
-        
+
         const added = await redis.pfadd(`view:${item.postId}`, identity).catch(() => 1);
         if (added === 1) {
-          await processWalletTransaction({ 
-            userId: item.userId, 
-            action: 'VIEW_REEL', 
-            isCreator: true, 
-            meta: { refId: item.postId } 
+          await processWalletTransaction({
+            userId: item.userId,
+            action: 'VIEW_REEL',
+            isCreator: true,
+            meta: { refId: item.postId }
           });
-          
+
           await db5.query(`UPDATE posts SET views = views + 1 WHERE id=$1`, [item.postId]);
           const { rows } = await db5.query(`SELECT views, "userId", title, type FROM posts WHERE id=$1`, [item.postId]);
           const p = rows[0];
-          
+
           if (p && MILESTONES.includes(p.views)) {
             const milestoneKey = `milestone:${item.postId}`;
             const alreadySent = await redis.sismember(milestoneKey, p.views).catch(() => 0);
             if (!alreadySent) {
               await redis.sadd(milestoneKey, p.views).catch(() => {});
               await redis.expire(milestoneKey, 30 * 24 * 60 * 60).catch(() => {});
+              
+              // Safe slice on optional title
+              const safeTitle = (p.title || '').slice(0, 20);
+              const viewDisplay = p.views >= 1000 ? `${p.views / 1000}K` : p.views;
+
               await sendNotification(
-                p.userId, 
-                'VIRAL', 
-                `🔥 ${p.views >= 1000 ? p.views / 1000 + 'K' : p.views} Views!`, 
-                `Your ${p.type} "${p.title.slice(0, 20)}" just hit ${p.views.toLocaleString()} views!`
+                p.userId,
+                'VIRAL',
+                `🔥 ${viewDisplay} Views!`,
+                `Your ${p.type} "${safeTitle}" just hit ${p.views.toLocaleString()} views!`
               ).catch(() => {});
             }
           }
@@ -1800,6 +1802,7 @@ cron.schedule('*/30 * * * * *', async () => {
     interactionBuffer.unshift(...failedItems);
   }
 });
+
 // 2. Nightly Monetization Evaluation (00:00 Daily)
 cron.schedule('0 0 * * *', async () => {
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
@@ -1808,15 +1811,19 @@ cron.schedule('0 0 * * *', async () => {
       const users = await db.user.findMany({ where: { monetizeFlag: false } });
       for (const user of users) {
         const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000);
-        const followers = await getTotalFollowers(user.id); // FIXED
-        
-        if (days >= 7 && followers >= 10) { 
+        const followers = await getTotalFollowers(user.id);
+
+        if (days >= 7 && followers >= 10) {
           await db.user.update({ where: { id: user.id }, data: { monetizeFlag: true, freeFarmingStopped: true } });
-          sendNotification(user.id, 'MONETIZE', 'Congrats! You\'re Earning 💰', 'You hit 7 days + 10 followers. Earnings now go to Cash.');
-          await sendEmail(user.email, 'Monetization Activated!', `You hit 7 days + 10 followers. Earnings now go to Cash.`);
+          
+          // Added missing await
+          await sendNotification(user.id, 'MONETIZE', "Congrats! You're Earning 💰", 'You hit 7 days + 10 followers. Earnings now go to Cash.');
+          await sendEmail(user.email, 'Monetization Activated!', 'You hit 7 days + 10 followers. Earnings now go to Cash.');
         }
       }
-    } catch (err) { console.error('[Midnight Cron Error]', err.message); }
+    } catch (err) {
+      console.error('[Midnight Cron Error]', err.message);
+    }
   }
 });
 
@@ -1840,7 +1847,6 @@ cron.schedule('*/5 * * * *', async () => {
   }
 });
 
-// 4. B2 Media Clean up & Deletion (Every Day at 3:00 AM) - Skip Boosted Posts
 // 4. B2 Media Archive & Cleanup (Every Day at 3:00 AM)
 cron.schedule('0 3 * * *', async () => {
   const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
@@ -1921,7 +1927,7 @@ cron.schedule('0 * * * *', async () => {
 cron.schedule('0 * * * *', async () => {
   const cutoffTime = new Date(Date.now() - 72 * 60 * 60 * 1000);
   let deletedTotal = 0;
-  
+
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
   for (const db of targets) {
     try {
@@ -1935,6 +1941,7 @@ cron.schedule('0 * * * *', async () => {
   }
   if (deletedTotal > 0) console.log(`[DM CRON] Deleted ${deletedTotal} messages >72h`);
 });
+
 
 // ========== HEALTH CHECK UP ==========
 app.get('/', (req, res) => {
