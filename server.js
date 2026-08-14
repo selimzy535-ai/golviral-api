@@ -1365,6 +1365,18 @@ app.post('/api/wallet/withdraw', authenticateToken, requireFaceVerified, require
   }
 });
 
+app.get('/api/test-push', authenticateToken, async (req,res)=>{
+  const { userId } = req.user;
+  console.log('[TEST PUSH] Using VAPID:', process.env.VAPID_PUBLIC_KEY.slice(0,10)+'...');
+  
+  try {
+    await sendNotification(userId, 'TEST', 'VAPID Test', 'If you see this, key is valid');
+    res.json({sent: true, key: process.env.VAPID_PUBLIC_KEY.slice(0,10)+'...'});
+  } catch(e){
+    console.error('[TEST PUSH ERROR]', e.message);
+    res.status(500).json({error: e.message});
+  }
+})
 
 app.post('/api/wallet/withdraw/confirm', authenticateToken, async (req, res) => {
   const { userId } = req.user;
