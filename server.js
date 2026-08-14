@@ -87,12 +87,17 @@ const b2Clients = {
   b2c: new S3Client({ endpoint: b2Config.c.endpoint, credentials: { accessKeyId: b2Config.c.key, secretAccessKey: b2Config.c.secret }, region: 'us-west-000' }),
 };
 
-// SET VAPID KEYS ONCE. Replace with your real keys
+// HARD REQUIRE: No fallback. Server will crash on boot if keys missing
+if(!process.env.VAPID_PUBLIC_KEY ||!process.env.VAPID_PRIVATE_KEY){
+  throw new Error('[FATAL] VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must be set in.env');
+}
+
 webpush.setVapidDetails(
   'mailto:carl56590@gmail.com',
-  process.env.VAPID_PUBLIC_KEY || 'BEl0YourPublicKeyHere',
-  process.env.VAPID_PRIVATE_KEY || 'YourPrivateKeyHere'
+  process.env.VAPID_PUBLIC_KEY,
+  process.env.VAPID_PRIVATE_KEY
 );
+console.log('[Push] VAPID initialized with key:', process.env.VAPID_PUBLIC_KEY.slice(0,10)+'...');
 
 // ========== 7. HELPER FUNCTIONS & ROUTING HELPERS ==========
 function getShardIndex(id) {
@@ -1588,19 +1593,21 @@ app.post('/api/gift/send', authenticateToken, async (req,res)=>{
 // ========== HELPER: SEND NOTIFICATION ==========
 async function sendNotification(userId, type, title, body, data = {}) {
   const db = getDbShard(userId);
-  
-  // 1. Save to DB for bell icon
-  await db.client.notification.create({
-    data: { userId, type, title, body, data }
-  }).catch(()=>{});
+  await db.client.notification.create({ data: { userId, type, title, body, data } }).catch(()=>{});
 
-  // 2. Send web push if user subscribed
   const subs = await db.client.pushSubscription.findMany({ where: { userId } }).catch(()=>[]);
+  if(subs.length === 0) return;
+
   for(const sub of subs){
     const pushSubscription = { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } };
-    webpush.sendNotification(pushSubscription, JSON.stringify({title, body, data})).catch(async () => {
-      // Delete dead subscription
-      await db.client.pushSubscription.delete({ where: { id: sub.id } }).catch(()=>{});
+    webpush.sendNotification(pushSubscription, JSON.stringify({title, body, data}))
+  .then(() => console.log(`[Push OK] VAPID key is VALID. Sent to ${userId}`))
+  .catch(async (err) => {
+      console.error(`[Push FAIL] VAPID key is FAKE/WRONG`);
+      console.error(`Status: ${err.statusCode} | Body: ${err.body}`); // 400 = bad key
+      if(err.statusCode === 410 || err.statusCode === 404){
+        await db.client.pushSubscription.delete({ where: { id: sub.id } }).catch(()=>{});
+      }
     });
   }
 }
