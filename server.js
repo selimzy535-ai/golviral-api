@@ -1140,34 +1140,26 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
 app.get('/api/user/:id', authenticateToken, async (req, res) => {
   try {
     const { id: targetId } = req.params;
-    const meId = req.user.userId; 
+    const meId = req.user.userId; // <-- we need this
     const db = getDbShard(targetId);
 
     const user = await db.client.user.findUnique({
       where: { id: targetId },
-      select: { 
-        id: true, 
-        username: true, 
-        createdAt: true, 
-        isVerified: true,  
-        dmUnlocked: true   
-      }
+      select: { id: true, username: true, createdAt: true, isVerified: true, dmUnlocked: true }
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const posts = await db.client.post.findMany({
-      where: { userId: targetId, status: 'ACTIVE' },
-      select: { id: true, views: true, likes: true }
-    });
+    const posts = await db.client.post.findMany({ where: { userId: targetId, status: 'ACTIVE' }, select: { id: true, views: true, likes: true } });
 
-    const followers = await getTotalFollowers(targetId); // FIXED
-    const following = await getTotalFollowing(targetId); // FIXED
-    
+    const followers = await getTotalFollowers(targetId);
+    const following = await getTotalFollowing(targetId);
+
+    // ADD THIS BLOCK - Check if ME follows TARGET
     let isFollowing = false;
     const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
     for(const shard of dbs){
-      const rel = await shard.follow.findFirst({ 
-        where: { followerId: meId, followingId: targetId } 
+      const rel = await shard.follow.findFirst({
+        where: { followerId: meId, followingId: targetId }
       }).catch(() => null);
       if(rel) { isFollowing = true; break; }
     }
@@ -1175,23 +1167,16 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
     const totalViews = posts.reduce((sum, p) => sum + p.views, 0);
     const totalLikes = posts.reduce((sum, p) => sum + p.likes, 0);
     const monetized = await isUserMonetized(targetId);
+    const profile = await profilePool.query(`SELECT bio FROM profiles WHERE user_id=$1`, [targetId]).catch(()=>({rows:[]}));
 
-const profile = await profilePool.query(
-      `SELECT bio FROM profiles WHERE user_id=$1`, [targetId]
-    ).catch(()=>({rows:[]}));
-
-res.json({
+    res.json({
       userId: targetId,
       username: user.username,
-      bio: profile.rows[0]?.bio || "",  // <-- ADD THIS
-      isVerified: user.isVerified || monetized,     
-      dmUnlocked: user.dmUnlocked || monetized,     
-      totalViews,                                      
-      totalLikes,                                      
-      totalPosts: posts.length,        
-      followers,                                       
-      following,                                       
-      isFollowing,                                     
+      bio: profile.rows[0]?.bio || "",
+      isVerified: user.isVerified || monetized,
+      dmUnlocked: user.dmUnlocked || monetized,
+      totalViews, totalLikes, totalPosts: posts.length,
+      followers, following, isFollowing, // <-- ADD THIS LINE
       profileLink: `${APP_BASE_URL}/u/${targetId}`,
       referralLink: `${APP_BASE_URL}/auth.html?ref=${targetId}`
     });
