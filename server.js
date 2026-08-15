@@ -1704,36 +1704,79 @@ app.get('/api/search/users', authenticateToken, async (req, res) => {
 
 // ========== ENDPOINT 4-7: PUSH SYSTEM ==========
 app.post('/api/push/subscribe', authenticateToken, async (req, res) => {
-  const { userId } = req.user;
-  const { subscription } = req.body; // {endpoint, keys:{p256dh, auth}}
-  const db = getDbShard(userId);
-  await db.client.pushSubscription.upsert({
-    where: { endpoint: subscription.endpoint },
-    update: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth },
-    create: { userId, endpoint: subscription.endpoint, p256dh: subscription.keys.p256dh, auth: subscription.keys.auth }
-  });
-  res.json({success: true});
+  try {
+    const { userId } = req.user; // Correct
+    const { subscription } = req.body; // {endpoint, keys:{p256dh, auth}}
+    
+    if(!subscription || !subscription.endpoint) {
+      return res.status(400).json({error: 'Invalid subscription'});
+    }
+    
+    const db = getDbShard(userId);
+    await db.client.pushSubscription.upsert({
+      where: { endpoint: subscription.endpoint },
+      update: { 
+        p256dh: subscription.keys.p256dh, 
+        auth: subscription.keys.auth,
+        userId: userId // in case user logged in on new device
+      },
+      create: { 
+        userId, 
+        endpoint: subscription.endpoint, 
+        p256dh: subscription.keys.p256dh, 
+        auth: subscription.keys.auth 
+      }
+    });
+    
+    console.log(`[PUSH] Saved subscription for ${userId}`);
+    res.json({success: true});
+  } catch(e) {
+    console.error('[PUSH SUB ERROR]', e);
+    res.status(500).json({error: e.message});
+  }
 });
 
 app.post('/api/push/unsubscribe', authenticateToken, async (req, res) => {
-  const { endpoint } = req.body;
-  const db = getDbShard(req.userId);
-  await db.client.pushSubscription.delete({ where: { endpoint } }).catch(()=>{});
-  res.json({success: true});
+  try {
+    const { endpoint } = req.body;
+    const { userId } = req.user; // BUG FIX: was req.userId
+    const db = getDbShard(userId);
+    await db.client.pushSubscription.delete({ where: { endpoint } }).catch(()=>{});
+    res.json({success: true});
+  } catch(e) {
+    res.status(500).json({error: e.message});
+  }
 });
 
 app.get('/api/notifications', authenticateToken, async (req, res) => {
-  const { userId } = req.user;
-  const { page = 1, limit = 20 } = req.query;
-  const db = getDbShard(userId);
-  const notifs = await db.client.notification.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, skip: (page-1)*limit, take: Number(limit) });
-  res.json(notifs);
+  try {
+    const { userId } = req.user; // Correct
+    const { page = 1, limit = 20 } = req.query;
+    const db = getDbShard(userId);
+    const notifs = await db.client.notification.findMany({ 
+      where: { userId }, 
+      orderBy: { createdAt: 'desc' }, 
+      skip: (page-1)*limit, 
+      take: Number(limit) 
+    });
+    res.json(notifs);
+  } catch(e) {
+    res.status(500).json({error: e.message});
+  }
 });
 
 app.post('/api/notifications/read/:id', authenticateToken, async (req, res) => {
-  const db = getDbShard(req.userId);
-  await db.client.notification.update({ where: { id: req.params.id }, data: { isRead: true } }).catch(()=>{});
-  res.json({success: true});
+  try {
+    const { userId } = req.user; // BUG FIX: was req.userId
+    const db = getDbShard(userId);
+    await db.client.notification.update({ 
+      where: { id: req.params.id, userId: userId }, // added userId check for security
+      data: { isRead: true } 
+    }).catch(()=>{});
+    res.json({success: true});
+  } catch(e) {
+    res.status(500).json({error: e.message});
+  }
 });
 // 3. EXPORT FOR profile.js + ADMIN.JS TO USE
 module.exports = {
