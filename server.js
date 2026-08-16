@@ -1145,7 +1145,7 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
 app.get('/api/user/:id', authenticateToken, async (req, res) => {
   try {
     const { id: targetId } = req.params;
-    const meId = req.user.userId; // <-- we need this
+    const meId = req.user.userId;
     const db = getDbShard(targetId);
 
     const user = await db.client.user.findUnique({
@@ -1154,27 +1154,32 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
+    // 1. Get totals from db5 where posts actually live
     const { rows: stats } = await db5.query(
-  `SELECT COALESCE(SUM(views),0) as views, COALESCE(SUM(likes),0) as likes 
-   FROM posts WHERE "userId"=$1 AND status='ACTIVE'`, 
-  [targetId]
-);
-
-    const followers = await getTotalFollowers(targetId);
-    const following = await getTotalFollowing(targetId);
-
-    // ADD THIS BLOCK - Check if ME follows TARGET
-    let isFollowing = false;
-    const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
-    for(const shard of dbs){
-      const rel = await shard.follow.findFirst({
-        where: { followerId: meId, followingId: targetId }
-      }).catch(() => null);
-      if(rel) { isFollowing = true; break; }
-    }
+      `SELECT 
+        COALESCE(SUM(views),0) as views, 
+        COALESCE(SUM(likes),0) as likes,
+        COUNT(*) as total
+       FROM posts 
+       WHERE "userId"=$1 AND status='ACTIVE'`, 
+      [targetId]
+    );
 
     const totalViews = parseInt(stats[0].views);
     const totalLikes = parseInt(stats[0].likes);
+    const totalPosts = parseInt(stats[0].total);
+
+    // 2. Followers/Following from db5
+    const followers = await getTotalFollowers(targetId);
+    const following = await getTotalFollowing(targetId);
+
+    // 3. Check if ME follows TARGET - also from db5
+    const { rows: followRows } = await db5.query(
+      `SELECT 1 FROM follows WHERE "followerId"=$1 AND "followingId"=$2 LIMIT 1`,
+      [meId, targetId]
+    );
+    const isFollowing = followRows.length > 0;
+
     const monetized = await isUserMonetized(targetId);
     const profile = await profilePool.query(`SELECT bio FROM profiles WHERE user_id=$1`, [targetId]).catch(()=>({rows:[]}));
 
@@ -1184,12 +1189,17 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
       bio: profile.rows[0]?.bio || "",
       isVerified: user.isVerified || monetized,
       dmUnlocked: user.dmUnlocked || monetized,
-      totalViews, totalLikes, totalPosts: posts.length,
-      followers, following, isFollowing, // <-- ADD THIS LINE
+      totalViews, 
+      totalLikes, 
+      totalPosts, // fixed
+      followers, 
+      following, 
+      isFollowing,
       profileLink: `${APP_BASE_URL}/u/${targetId}`,
       referralLink: `${APP_BASE_URL}/auth.html?ref=${targetId}`
     });
   } catch (err) {
+    console.error('[User Profile Error]', err.message);
     res.status(500).json({ error: 'Failed to load profile' });
   }
 });
@@ -1684,6 +1694,7 @@ app.get('/api/search/users', authenticateToken, async (req, res) => {
   try {
     const { q } = req.query;
     if (!q || q.trim().length < 2) return res.json([]);
+    
     const searchTerm = q.trim();
     const allUsers = [];
     const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
@@ -1696,15 +1707,24 @@ app.get('/api/search/users', authenticateToken, async (req, res) => {
       }).catch(()=>[]);
       
       for(const u of users){
-        let followers = 0;
-      const { rows } = await db5.query(`SELECT COUNT(*) FROM follows WHERE "followingId"=$1`, [u.id]);
-      let followers = parseInt(rows[0].count);
+        // FIX: Get followers from db5 where follows table actually is
+        const { rows } = await db5.query(`SELECT COUNT(*) FROM follows WHERE "followingId"=$1`, [u.id]);
+        const followers = parseInt(rows[0].count);
+        
         allUsers.push({...u, followers})
       }
     }
-    allUsers.sort((a,b) => b.followers - a.followers);
-    res.json(allUsers.slice(0, 20));
-  } catch (err) { res.status(500).json({ error: 'Search failed' }); }
+    
+    // Dedupe users in case same username exists on 2 shards
+    const uniqueUsers = [...new Map(allUsers.map(item => [item.id, item])).values()];
+    
+    uniqueUsers.sort((a,b) => b.followers - a.followers);
+    res.json(uniqueUsers.slice(0, 20));
+    
+  } catch (err) { 
+    console.error('[Search Users Error]', err.message);
+    res.status(500).json({ error: 'Search failed' }); 
+  }
 });
 
 // ========== ENDPOINT 4-7: PUSH SYSTEM ==========
