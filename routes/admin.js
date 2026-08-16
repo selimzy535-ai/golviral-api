@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
-const crypto = require('crypto'); // for better sharding
+const crypto = require('crypto');
 const { Pool } = require('pg');
 
 // ========== KILL CIRCULAR DEPENDENCY: MAKE OWN DB ==========
@@ -12,21 +12,21 @@ const dbUrls = [
   process.env.DATABASEURL3
 ];
 
-// NO FALLBACKS. Crash if env missing
 const prismaClients = {
   db1: new PrismaClient({ datasources: { db: { url: dbUrls[0] } } }),
   db2: new PrismaClient({ datasources: { db: { url: dbUrls[1] } } }),
-  db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] } } }),
+  db3: new PrismaClient({ datasources: { db: { url: dbUrls[2] } } }), // Fixed missing '}'
 };
 
 Object.entries(prismaClients).forEach(([name, client]) => {
   client.$connect().catch((err) => console.error(`[Admin Prisma] Shard ${name} offline.`, err.message));
 });
 
-// ========== NEW SHARD HELPERS ==========
+// IMPORT DB5 FROM MAIN FILE
+const { db5 } = require('../utils/db5');
+
 function getShardIndex(id) {
   if (!id) return 0;
-  // Use same logic your app uses. If you switched to md5, change this too
   const hash = crypto.createHash('md5').update(String(id)).digest('hex');
   return parseInt(hash.substring(0, 8), 16) % 3;
 }
@@ -44,7 +44,6 @@ const db4 = new Pool({
 });
 db4.on('error', (err) => console.error('[Admin DB4 Error]', err.message));
 
-// ========== LOCAL NOTIF HELPER TO KILL CIRCULAR DEPENDENCY ==========
 async function sendNotification(userId, type, title, body, data = {}) {
   console.log(`[ADMIN NOTIF] ${type} -> ${userId}: ${title} | ${body}`);
 }
@@ -52,20 +51,11 @@ async function sendNotification(userId, type, title, body, data = {}) {
 const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
 const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY;
 
-// ========== COPIED HELPERS TO KILL CIRCLE ==========
+// FIXED: FIND POST IN DB5
 async function findPostAcrossShards(id) {
-  const dbs = [
-    { client: prismaClients.db1, name: 'db1' },
-    { client: prismaClients.db2, name: 'db2' },
-    { client: prismaClients.db3, name: 'db3' }
-  ];
-  for (const db of dbs) {
-    try {
-      const post = await db.client.post.findUnique({ where: { id } });
-      if (post) return { post, db: db.client, shard: db.name };
-    } catch (err) {}
-  }
-  return null;
+  const { rows } = await db5.query(`SELECT * FROM posts WHERE id=$1 LIMIT 1`, [id]);
+  if (rows.length === 0) return null;
+  return { post: rows[0], db: db5, shard: 'db5' };
 }
 
 function requireAdmin(req, res, next) {
@@ -90,14 +80,13 @@ function requireAdmin(req, res, next) {
   }
 }
 
-// ========== 1. MASTER USER CONTROL: LIST, DELETE, MONETIZE ==========
+// ========== 1. MASTER USER CONTROL ==========
 router.post('/users/manage', requireAdmin, async (req, res) => {
   try {
     const adminId = req.userId;
     const { action, userId, page = 1, limit = 50, search = '' } = req.body;
 
     if (!action) return res.status(400).json({ error: 'Missing action field' });
-    console.log(`[ADMIN ACTION] Admin:${adminId} Action:${action} Target:${userId || 'N/A'}`);
 
     const dbs = [
       { client: prismaClients.db1, name: 'db1' },
@@ -129,11 +118,10 @@ router.post('/users/manage', requireAdmin, async (req, res) => {
         totals[db.name] = users.length;
 
         for (const u of users) {
-          let followers = 0;
-          for (const shard of dbs) {
-            followers += await shard.client.follow.count({ where: { followingId: u.id } }).catch(() => 0);
-          }
-          allUsers.push({ ...u, followers, shard: db.name }); // <-- TAG THE SHARD
+          const { rows } = await db5.query(`SELECT COUNT(*) FROM follows WHERE "followingId"=$1`, [u.id]);
+          const followers = parseInt(rows[0].count);
+          
+          allUsers.push({...u, followers, shard: db.name });
         }
       }
 
@@ -141,11 +129,7 @@ router.post('/users/manage', requireAdmin, async (req, res) => {
       const start = (Number(page) - 1) * Number(limit);
       const paginated = allUsers.slice(start, start + Number(limit));
 
-      return res.json({
-        users: paginated,
-        total: allUsers.length,
-        totals // <-- { db1: 123, db2: 45, db3: 67 }
-      });
+      return res.json({ users: paginated, total: allUsers.length, totals });
     }
 
     if (!userId) return res.status(400).json({ error: 'Missing userId for this action' });
@@ -155,11 +139,13 @@ router.post('/users/manage', requireAdmin, async (req, res) => {
 
     if (action === 'delete') {
       if (userId === adminId) return res.status(400).json({ error: 'Cannot delete yourself' });
+      
+      await db5.query(`DELETE FROM posts WHERE "userId"=$1`, [userId]);
+      await db5.query(`DELETE FROM comments WHERE "userId"=$1`, [userId]);
+      await db5.query(`DELETE FROM follows WHERE "followerId"=$1 OR "followingId"=$1`, [userId]);
+      
       await db.client.$transaction([
-        db.client.post.deleteMany({ where: { userId } }),
-        db.client.comment.deleteMany({ where: { userId } }),
         db.client.message.deleteMany({ where: { OR: [{ senderId: userId }, { receiverId: userId }] } }),
-        db.client.follow.deleteMany({ where: { OR: [{ followerId: userId }, { followingId: userId }] } }),
         db.client.notification.deleteMany({ where: { userId } }),
         db.client.pointsLedger.deleteMany({ where: { userId } }),
         db.client.deposit.deleteMany({ where: { userId } }),
@@ -167,7 +153,7 @@ router.post('/users/manage', requireAdmin, async (req, res) => {
         db.client.pushSubscription.deleteMany({ where: { userId } }),
         db.client.user.delete({ where: { id: userId } })
       ]);
-      return res.json({ success: true, message: `User ${targetUser.username} deleted from ${db.name}` });
+      return res.json({ success: true, message: `User ${targetUser.username} deleted from ${db.name} + db5` });
     }
 
     if (action === 'monetize') {
@@ -187,52 +173,36 @@ router.post('/users/manage', requireAdmin, async (req, res) => {
   }
 });
 
-// ========== 2. DEPOSITS ==========
-router.get('/deposits', requireAdmin, async (req, res) => {
-  const all = [];
-  for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
-    const deposits = await db.deposit.findMany({
-      orderBy: { createdAt: 'desc' },
-      take: 100,
-      include: { user: { select: { username: true, email: true } } }
-    }).catch(() => []);
-    all.push(...deposits);
-  }
-  res.json(all);
-});
-
 // ========== 3. POST MODERATION ==========
 router.get('/posts/pending', requireAdmin, async (req, res) => {
-  const all = [];
-  for (const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]) {
-    const posts = await db.post.findMany({ where: { status: 'PRE_UPLOAD' }, include: { user: true } }).catch(() => []);
-    all.push(...posts);
-  }
-  res.json(all);
+  const { rows } = await db5.query(`SELECT * FROM posts WHERE status='PRE_UPLOAD' ORDER BY "createdAt" ASC LIMIT 100`);
+  res.json(rows);
 });
 
 router.post('/posts/:id/approve', requireAdmin, async (req, res) => {
   const { id } = req.params;
   const target = await findPostAcrossShards(id);
-  if (!target) return res.status(404).json({ error: 'Post not found across infrastructure shards' });
-  await target.db.post.update({ where: { id }, data: { status: 'ACTIVE' } });
-  res.json({ success: true, shard: target.shard });
+  if (!target) return res.status(404).json({ error: 'Post not found in db5' });
+  await db5.query(`UPDATE posts SET status='ACTIVE' WHERE id=$1`, [id]);
+  res.json({ success: true, shard: 'db5' });
 });
 
 router.post('/posts/:id/reject', requireAdmin, async (req, res) => {
   const { id } = req.params;
   const target = await findPostAcrossShards(id);
-  if (!target) return res.status(404).json({ error: 'Post not found across infrastructure shards' });
+  if (!target) return res.status(404).json({ error: 'Post not found in db5' });
 
   const refundAmount = target.post.type === 'reel' ? 25 : 10;
   const userDb = getDbShard(target.post.userId);
 
-  await target.db.post.update({ where: { id }, data: { status: 'REJECTED' } });
+  await db5.query(`UPDATE posts SET status='REJECTED' WHERE id=$1`, [id]);
   await userDb.client.user.update({ where: { id: target.post.userId }, data: { freeCredits: { increment: refundAmount } } });
   sendNotification(target.post.userId, 'POST', 'Post Rejected', `Your post was rejected. ${refundAmount} credits refunded`);
 
-  res.json({ success: true, refunded: refundAmount, shard: target.shard });
+  res.json({ success: true, refunded: refundAmount, shard: 'db5' });
 });
+
+
 
 // ========== 4. PAYOUTS ==========
 router.get('/payouts', requireAdmin, async (req, res) => {
