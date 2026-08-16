@@ -1154,7 +1154,11 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const posts = await db.client.post.findMany({ where: { userId: targetId, status: 'ACTIVE' }, select: { id: true, views: true, likes: true } });
+    const { rows: stats } = await db5.query(
+  `SELECT COALESCE(SUM(views),0) as views, COALESCE(SUM(likes),0) as likes 
+   FROM posts WHERE "userId"=$1 AND status='ACTIVE'`, 
+  [targetId]
+);
 
     const followers = await getTotalFollowers(targetId);
     const following = await getTotalFollowing(targetId);
@@ -1169,8 +1173,8 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
       if(rel) { isFollowing = true; break; }
     }
 
-    const totalViews = posts.reduce((sum, p) => sum + p.views, 0);
-    const totalLikes = posts.reduce((sum, p) => sum + p.likes, 0);
+    const totalViews = parseInt(stats[0].views);
+    const totalLikes = parseInt(stats[0].likes);
     const monetized = await isUserMonetized(targetId);
     const profile = await profilePool.query(`SELECT bio FROM profiles WHERE user_id=$1`, [targetId]).catch(()=>({rows:[]}));
 
@@ -1693,7 +1697,8 @@ app.get('/api/search/users', authenticateToken, async (req, res) => {
       
       for(const u of users){
         let followers = 0;
-        for(const shard of dbs) followers += await shard.follow.count({ where: { followingId: u.id } }).catch(() => 0);
+      const { rows } = await db5.query(`SELECT COUNT(*) FROM follows WHERE "followingId"=$1`, [u.id]);
+      let followers = parseInt(rows[0].count);
         allUsers.push({...u, followers})
       }
     }
