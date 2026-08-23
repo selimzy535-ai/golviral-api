@@ -664,6 +664,57 @@ app.post('/api/post/upload-video', authenticateToken, upload.single('video'), as
   }
 });
 
+// ========== CDN FINALIZE CALLBACK FROM golviral-cdn ==========
+app.post('/api/post/cdn-finalize', async (req, res) => {
+  try {
+    const { postId, status, userId, file_id, botId, type, title, caption, error } = req.body;
+    // type will be 'reel', 'story', 'image', 'video' from CDN
+
+    if (!postId ||!status ||!userId) {
+      return res.status(400).json({ error: 'Missing postId, status or userId' });
+    }
+
+    const userDb = getDbShard(userId);
+    console.log(`[CDN CALLBACK] postId:${postId} status:${status}`);
+
+    if (status === 'READY') {
+      // Approved. Make it live. We don't use b2Url anymore
+      await db5.query(`
+        UPDATE posts
+        SET status='ACTIVE', file_id=$1, "botId"=$2, type=$3, title=$4, caption=$5
+        WHERE id=$6
+      `, [file_id, botId, type || 'reel', title || '', caption || '', postId]);
+
+      console.log(`[CDN CALLBACK] Post ${postId} set to ACTIVE`);
+      return res.json({ success: true });
+
+    } else if (status === 'REJECTED' || status === 'FAILED') {
+      // Admin rejected or worker failed. Delete post + refund credits
+      const { rows } = await db5.query(`SELECT type FROM posts WHERE id=$1`, [postId]);
+      const postType = rows[0]?.type || 'reel';
+
+      await db5.query(`UPDATE posts SET status='REJECTED' WHERE id=$1`, [postId]);
+
+      // Refund credits: 25 for video/reel, 10 for story/novel/store
+      const refundAmount = (postType === 'novel' || postType === 'story' || postType === 'store')? 10 : 25;
+
+      await userDb.client.user.update({
+        where: { id: userId },
+        data: { freeCredits: { increment: refundAmount } }
+      }).catch(() => {});
+
+      console.log(`[CDN CALLBACK] Post ${postId} REJECTED. Type:${postType} Refunded:${refundAmount}`);
+      return res.json({ success: true, refunded: refundAmount });
+    }
+
+    res.json({ success: true });
+
+  } catch (err) {
+    console.error('[CDN FINALIZE ERROR]', err.message);
+    res.status(500).json({ error: 'Failed to finalize post' });
+  }
+});
+
 // ========== LIVE TRACKING & FEED PORTS ==========
 app.post('/api/view', (req, res) => {
   const { postId, userId, viewerId, viewerIp } = req.body;
@@ -1088,13 +1139,20 @@ const bucketMap = {
 
 app.get('/api/media/sign', authenticateToken, async (req,res)=>{
   try{
-    const {key, shard} = req.query;
-    if(!key || shard===undefined) return res.status(400).json({error:'missing params'});
+    const {postId} = req.query;
+    if(!postId) return res.status(400).json({error:'postId required'});
 
-    const {client, bucket} = bucketMap[Number(shard)] || bucketMap[0];
-    const cmd = new GetObjectCommand({Bucket: bucket, Key: key});
-    const url = await getSignedUrl(client, cmd, {expiresIn: 900});
-    res.json({url});
+    const { rows } = await db5.query(`SELECT file_id, botId, type FROM posts WHERE id=$1`, [postId]);
+    const post = rows[0];
+    if(!post?.file_id || post?.botId === null){
+      return res.status(404).json({error:'Media not ready'});
+    }
+
+    // Call CDN to get fresh TG URL
+    const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh?file_id=${post.file_id}&botId=${post.botId}`, {
+      headers: { 'x-api-key': process.env.CDN_API_KEY }
+    });
+    res.json({ url: cdnRes.data.url });
   }catch(e){
     console.error('[Sign Error]', e.message);
     res.status(500).json({error:'sign failed'});
