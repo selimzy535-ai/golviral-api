@@ -594,43 +594,34 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
   console.log(`[CREATE START] user:${userId} postId:${postId}`);
 
   try {
-    // 1. Find post in db5
     const { rows } = await db5.query(`SELECT * FROM posts WHERE id=$1 AND "userId"=$2`, [postId, userId]);
     const post = rows[0];
     if (!post) return res.status(404).json({ error: 'Post not found' });
-    if (post.status !== 'PRE_UPLOAD') return res.status(400).json({ error: 'Post already processed' });
+    if (post.status!== 'PRE_UPLOAD') return res.status(400).json({ error: 'Post already processed' });
 
-    // 2. TEXT POSTS: Novel, Story, Store. No B2 needed
-    if (post.type === 'novel' || post.type === 'story' || post.type === 'store') {
-      await db5.query(`
-        UPDATE posts SET status='ACTIVE', title=$1, content=$2
-        WHERE id=$3
-      `, [title || '', content || '', postId]);
-
-      console.log(`[CREATE SUCCESS] Text post live: ${postId}`);
+    // 1. TEXT POSTS: Publish immediately
+    if (post.type === 'novel' || post.type === 'store') {
+      await db5.query(`UPDATE posts SET status='ACTIVE', title=$1, content=$2 WHERE id=$3`, [title || '', content || '', postId]);
       return res.json({ message: 'Content published', postId });
     }
 
-    // 3. VIDEO POSTS: Reel. Activate directly. Thumbnail later
-    await db5.query(`
-      UPDATE posts SET status='ACTIVE', "mediaUrl"=$1, title=$2, content=$3
-      WHERE id=$4
-    `, [objectKey, title || '', content || '', postId]);
+    // 2. MEDIA POSTS: story/reel. Send to CDN for processing
+    await db5.query(`UPDATE posts SET status='PENDING_CDN', title=$1, content=$2 WHERE id=$3`, [title || '', content || '', postId]);
 
-    console.log(`[CREATE SUCCESS] Reel live: ${postId}`);
-    res.json({ message: 'Content published', postId });
+    // Tell CDN to start processing
+    await axios.post(`${process.env.CDN_URL}/api/cdn/ingest`, {
+      postId, objectKey, userId, b2Shard: post.b2Shard, title: title || '', caption: content || ''
+    }, { headers: { 'x-api-key': process.env.CDN_API_KEY } }).catch(e => console.error('CDN ingest failed', e.message));
+
+    console.log(`[CREATE SUCCESS] Sent to CDN: ${postId}`);
+    res.json({ message: 'Processing started. Will be live after approval.', postId });
 
   } catch (err) {
     console.error(`[CREATE ERROR] postId:${postId}`, err.message);
-
-    // Refund user and reject post (FIXED BRACKETS)
     const userDb = getDbShard(userId);
     await db5.query(`UPDATE posts SET status='REJECTED' WHERE id=$1`, [postId]).catch(() => {});
-    await userDb.client.user.update({
-      where: { id: userId },
-      data: { freeCredits: { increment: 25 } }
-    }).catch(() => {});
-
+    const refund = (post.type === 'novel' || post.type === 'story' || post.type === 'store')? 10 : 25;
+    await userDb.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: refund } } }).catch(() => {});
     res.status(500).json({ error: 'Failed to publish post. Credits refunded.' });
   }
 });
@@ -665,50 +656,30 @@ app.post('/api/post/upload-video', authenticateToken, upload.single('video'), as
 });
 
 // ========== CDN FINALIZE CALLBACK FROM golviral-cdn ==========
+
 app.post('/api/post/cdn-finalize', async (req, res) => {
   try {
-    const { postId, status, userId, file_id, botId, type, title, caption, error } = req.body;
-    // type will be 'reel', 'story', 'image', 'video' from CDN
-
-    if (!postId ||!status ||!userId) {
-      return res.status(400).json({ error: 'Missing postId, status or userId' });
-    }
+    const { postId, status, userId, file_id, botId, type, title, caption } = req.body;
+    if (!postId ||!status ||!userId) return res.status(400).json({ error: 'Missing fields' });
 
     const userDb = getDbShard(userId);
     console.log(`[CDN CALLBACK] postId:${postId} status:${status}`);
 
     if (status === 'READY') {
-      // Approved. Make it live. We don't use b2Url anymore
       await db5.query(`
-        UPDATE posts
-        SET status='ACTIVE', file_id=$1, "botId"=$2, type=$3, title=$4, caption=$5
-        WHERE id=$6
+        UPDATE posts SET status='ACTIVE', file_id=$1, "botId"=$2, type=$3, title=$4, caption=$5 WHERE id=$6
       `, [file_id, botId, type || 'reel', title || '', caption || '', postId]);
-
-      console.log(`[CDN CALLBACK] Post ${postId} set to ACTIVE`);
       return res.json({ success: true });
 
     } else if (status === 'REJECTED' || status === 'FAILED') {
-      // Admin rejected or worker failed. Delete post + refund credits
       const { rows } = await db5.query(`SELECT type FROM posts WHERE id=$1`, [postId]);
       const postType = rows[0]?.type || 'reel';
-
       await db5.query(`UPDATE posts SET status='REJECTED' WHERE id=$1`, [postId]);
-
-      // Refund credits: 25 for video/reel, 10 for story/novel/store
       const refundAmount = (postType === 'novel' || postType === 'story' || postType === 'store')? 10 : 25;
-
-      await userDb.client.user.update({
-        where: { id: userId },
-        data: { freeCredits: { increment: refundAmount } }
-      }).catch(() => {});
-
-      console.log(`[CDN CALLBACK] Post ${postId} REJECTED. Type:${postType} Refunded:${refundAmount}`);
+      await userDb.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: refundAmount } } }).catch(() => {});
       return res.json({ success: true, refunded: refundAmount });
     }
-
     res.json({ success: true });
-
   } catch (err) {
     console.error('[CDN FINALIZE ERROR]', err.message);
     res.status(500).json({ error: 'Failed to finalize post' });
@@ -841,22 +812,17 @@ app.get('/api/feed', async (req, res) => {
   try {
     const now = new Date().toISOString();
     const { rows } = await db5.query(`
-      SELECT 
-        id, "userId", type, title, content, "mediaUrl", "b2Shard", caption,
+      SELECT
+        id, "userId", type, title, content, "b2Shard", caption, file_id, "botId",
         likes, comments, views, score, "createdAt",
-        CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $1 THEN true ELSE false END as "isBoosted",
-        CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $1 THEN "externalLink" ELSE NULL END as "externalLink"
-      FROM posts 
+        CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $1 THEN true ELSE false END as "isBoosted"
+      FROM posts
       WHERE status='ACTIVE'
-      ORDER BY 
-        CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $1 THEN 1 ELSE 0 END DESC, 
-        score DESC
+      ORDER BY CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $1 THEN 1 ELSE 0 END DESC, score DESC
       LIMIT 30
     `, [now]);
-
     res.json(rows);
   } catch(err) {
-    console.error('[Feed Error]', err.message);
     res.status(500).json({ error: 'Failed to load feed' });
   }
 });
@@ -864,30 +830,39 @@ app.get('/api/feed', async (req, res) => {
 app.get('/api/post/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const target = await findPostAcrossShards(id);
+    const { rows } = await db5.query(`SELECT * FROM posts WHERE id = $1 LIMIT 1`, [id]);
+    const post = rows[0];
     
-    if (!target || target.post.status !== 'ACTIVE') {
+    if (!post || post.status !== 'ACTIVE') {
       return res.status(404).json({ error: 'Post not found' });
     }
 
-    const currentlyBoosted = target.post.isBoosted && target.post.boostExpiresAt && new Date(target.post.boostExpiresAt) > new Date();
+    const currentlyBoosted = post.isBoosted && post.boostExpiresAt && new Date(post.boostExpiresAt) > new Date();
 
     res.json({
-      id: target.post.id,
-      userId: target.post.userId,
-      type: target.post.type,
-      title: target.post.title,
-      content: target.post.content,
-      mediaUrl: target.post.mediaUrl,
-      b2Shard: target.post.b2Shard,
-      likes: target.post.likes,
-      comments: target.post.comments,
-      views: target.post.views,
-      caption: target.post.caption || '',
+      id: post.id,
+      userId: post.userId,
+      type: post.type,
+      title: post.title,
+      content: post.content,
+      caption: post.caption || '',
+      // CDN fields - IMPORTANT
+      file_id: post.file_id, 
+      botId: post.botId,
+      b2Shard: post.b2Shard,
+      // Old B2 field - keep for fallback
+      mediaUrl: post.mediaUrl,
+      
+      likes: post.likes,
+      comments: post.comments,
+      views: post.views,
+      score: post.score,
+      createdAt: post.createdAt,
       isBoosted: !!currentlyBoosted,
-      externalLink: currentlyBoosted ? target.post.externalLink : null
+      externalLink: currentlyBoosted ? post.externalLink : null
     });
   } catch (err) {
+    console.error('[Get Post Error]', err.message);
     res.status(500).json({ error: 'Post load failed' });
   }
 });
