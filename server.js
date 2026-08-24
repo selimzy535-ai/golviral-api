@@ -665,34 +665,42 @@ app.post('/api/post/cdn-finalize', async (req, res) => {
     const userDb = getDbShard(userId);
     console.log(`[CDN CALLBACK] postId:${postId} status:${status}`);
 
+    // 1. WORKER FINISHED PROCESSING - SEND TO ADMIN QUEUE
+    if (status === 'PENDING_APPROVAL') {
+      await db5.query(`
+        UPDATE posts SET status='PENDING_APPROVAL' WHERE id=$1
+      `, [postId]);
+      return res.json({ success: true });
+    }
+
+    // 2. ADMIN APPROVED
     if (status === 'READY') {
       await db5.query(`
         UPDATE posts SET status='ACTIVE', file_id=$1, "botId"=$2, type=$3, title=$4, caption=$5 WHERE id=$6
       `, [file_id, botId, type || 'reel', title || '', caption || '', postId]);
       return res.json({ success: true });
+    }
 
-    } else if (status === 'REJECTED' || status === 'FAILED') {
+    // 3. ADMIN REJECTED OR FAILED
+    if (status === 'REJECTED' || status === 'FAILED') {
       const { rows } = await db5.query(`SELECT type FROM posts WHERE id=$1`, [postId]);
       const postType = rows[0]?.type || 'reel';
       await db5.query(`UPDATE posts SET status='REJECTED' WHERE id=$1`, [postId]);
+
       const refundAmount = (postType === 'novel' || postType === 'story' || postType === 'store')? 10 : 25;
-      await userDb.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: refundAmount } } }).catch(() => {});
+      await userDb.client.user.update({
+        where: { id: userId },
+        data: { freeCredits: { increment: refundAmount } }
+      }).catch(() => {});
+
       return res.json({ success: true, refunded: refundAmount });
     }
-    res.json({ success: true });
+
+    res.status(400).json({ error: 'Invalid status' });
   } catch (err) {
     console.error('[CDN FINALIZE ERROR]', err.message);
     res.status(500).json({ error: 'Failed to finalize post' });
   }
-});
-
-// ========== LIVE TRACKING & FEED PORTS ==========
-app.post('/api/view', (req, res) => {
-  const { postId, userId, viewerId, viewerIp } = req.body;
-  if (postId && userId) {
-    interactionBuffer.push({ type: 'VIEW', postId, userId, viewerId, viewerIp, timestamp: Date.now() });
-  }
-  res.status(202).json({ buffered: true });
 });
 
 app.post('/api/like', authenticateToken, async (req, res) => {
