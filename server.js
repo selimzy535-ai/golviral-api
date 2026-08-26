@@ -498,23 +498,23 @@ app.post('/api/auth/reset-password', async (req, res) => {
 
 app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
   const { userId } = req.user;
-  const { fileExtension, contentType, postType, caption, externalLink } = req.body;
+  const { fileExtension, contentType, postType, caption, title, externalLink } = req.body; // ADDED title
 
-  const userDb = getDbShard(userId); // ONLY for credits check
+  const userDb = getDbShard(userId);
   const redis = getRedisShard(userId);
 
   const lock = await redis.set(`lock:${userId}`, '1', 'EX', 5, 'NX').catch(() => 'PASS_BYPASS_LOCK');
   if (!lock) return res.status(423).json({ error: 'Please wait, processing previous request' });
 
   try {
-    // 1. Check credits in db1,2,3
+    // 1. Check credits
     const user = await userDb.client.user.findUnique({ where: { id: userId } });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const fee = (postType === 'novel' || postType === 'story' || postType === 'store') ? 10 : 25;
     if (user.freeCredits < fee) return res.status(400).json({ error: `Insufficient points: Need ${fee} credits` });
 
-    // 2. Daily limit check - NOW CHECK db5
+    // 2. Daily limit check
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const { rows: countRows } = await db5.query(
@@ -527,66 +527,61 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
       return res.status(429).json({ error: `Daily ${postType} limit reached: ${DAILY_LIMIT}` });
     }
 
-    // 3. Deduct credits (FIXED BRACKETS)
+    // 3. Deduct credits
     await userDb.client.user.update({
       where: { id: userId },
       data: { freeCredits: { decrement: fee } }
     });
 
-    // 4. Generate B2 key + presigned URL
+    // 4. Generate B2 key ONLY - NO PRESIGNED URL
     const postId = crypto.randomBytes(8).toString('hex');
-    const b2 = getB2Shard(userId);
     const shardIndex = getShardIndex(userId);
 
     let key = '';
-    let presignedUrl = '';
 
     if (postType === 'story' || postType === 'store') {
-      const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-      if (!contentType) { // Text only story
-        key = '';
-      } else {
+      if (contentType) {
+        const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
         if (!allowedTypes.includes(contentType)) return res.status(400).json({ error: `Story only accepts images` });
         let ext = fileExtension || 'jpg';
         if (contentType.includes('png')) ext = 'png';
         if (contentType.includes('webp')) ext = 'webp';
         if (contentType.includes('gif')) ext = 'gif';
-        key = `story/${postId}.${ext}`;
-        const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: contentType });
-        presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
+        key = `uploads/raw/${userId}/${postId}.${ext}`; // MATCH CDN PATH
       }
 
     } else if (postType === 'reel') {
       const allowedTypes = ['video/mp4', 'video/quicktime', 'video/mov'];
-      if (!allowedTypes.includes(contentType)) return res.status(400).json({ error: `Reel only accepts video` });
+      if (contentType && !allowedTypes.includes(contentType)) return res.status(400).json({ error: `Reel only accepts video` });
       let ext = fileExtension || 'mp4';
-      if (contentType.includes('quicktime')) ext = 'mov';
-      key = `media/${postId}.${ext}`;
-      const cmd = new PutObjectCommand({ Bucket: b2.bucket, Key: key, ContentType: contentType });
-      presignedUrl = await getSignedUrl(b2.client, cmd, { expiresIn: 3600 });
+      if (contentType && contentType.includes('quicktime')) ext = 'mov';
+      key = `uploads/raw/${userId}/${postId}.${ext}`; // MATCH CDN PATH
 
     } else {
       // NOVEL: TEXT ONLY
       key = '';
     }
 
-    // 5. CRITICAL: INSERT INTO db5, NOT prisma
+    // 5. INSERT INTO db5 - ADDED title
     await db5.query(`
-      INSERT INTO posts(id, "userId", type, "mediaUrl", status, "b2Shard", caption, "externalLink", likes, comments, views, score)
-      VALUES($1,$2,$3,$4,'PRE_UPLOAD',$5,$6,$7,0,0,0,0)
-    `, [postId, userId, postType, key, shardIndex, caption || '', externalLink || '']);
+      INSERT INTO posts(id, "userId", type, title, "mediaUrl", status, "b2Shard", caption, "externalLink", likes, comments, views, score)
+      VALUES($1,$2,$3,$4,$5,'PRE_UPLOAD',$6,$7,$8,0,0,0,0)
+    `, [postId, userId, postType, title || '', key, shardIndex, caption || '', externalLink || '']);
 
     console.log(`[INTENT OK] user:${userId} type:${postType} postId:${postId}`);
-    res.json({ postId, uploadUrl: presignedUrl, objectKey: key });
+    res.json({ postId, uploadUrl: '', objectKey: key }); // uploadUrl empty because CDN handles upload
 
   } catch (err) {
     console.error('[Intent Error]', err.message);
+    // REFUND ON ERROR
+    const userDb = getDbShard(userId);
+    const refund = (postType === 'novel' || postType === 'story' || postType === 'store')? 10 : 25;
+    await userDb.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: refund } }).catch(() => {});
     res.status(500).json({ error: 'Failed to create post intent' });
   } finally {
     await redis.del(`lock:${userId}`).catch(() => {});
   }
 });
-
 app.post('/api/post/create', authenticateToken, async (req, res) => {
   const { userId } = req.user;
   const { postId, objectKey, title, content } = req.body;
