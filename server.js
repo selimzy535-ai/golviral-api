@@ -495,7 +495,6 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 });
 
-
 app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
   const { userId } = req.user;
   const { fileExtension, contentType, postType, caption, title, externalLink } = req.body; // ADDED title
@@ -573,15 +572,16 @@ app.post('/api/post/create-intent', authenticateToken, async (req, res) => {
 
   } catch (err) {
     console.error('[Intent Error]', err.message);
-    // REFUND ON ERROR
+    // REFUND ON ERROR (Fixed missing closing parenthesis before .catch)
     const userDb = getDbShard(userId);
-    const refund = (postType === 'novel' || postType === 'story' || postType === 'store')? 10 : 25;
-    await userDb.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: refund } }).catch(() => {});
+    const refund = (postType === 'novel' || postType === 'story' || postType === 'store') ? 10 : 25;
+    await userDb.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: refund } } }).catch(() => {});
     res.status(500).json({ error: 'Failed to create post intent' });
   } finally {
     await redis.del(`lock:${userId}`).catch(() => {});
   }
 });
+
 app.post('/api/post/create', authenticateToken, async (req, res) => {
   const { userId } = req.user;
   const { postId, objectKey, title, content } = req.body;
