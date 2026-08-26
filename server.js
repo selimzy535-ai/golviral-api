@@ -601,7 +601,7 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
     }
 
     // 2. MEDIA POSTS: story/reel. Send to CDN for processing
-    await db5.query(`UPDATE posts SET status='PENDING_CDN', title=$1, content=$2 WHERE id=$3`, [title || '', content || '', postId]);
+    await db5.query(`UPDATE posts SET status='PENDING_APPROVAL', title=$1, content=$2 WHERE id=$3`, [title || '', content || '', postId]);
 
     // Tell CDN to start processing
     await axios.post(`${process.env.CDN_URL}/api/cdn/ingest`, {
