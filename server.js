@@ -1128,7 +1128,7 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
     const {postId} = req.query;
     if(!postId) return res.status(400).json({error:'postId required'});
 
-    const { rows } = await db5.query(`SELECT file_id, botId, type FROM posts WHERE id=$1`, [postId]);
+    const { rows } = await db5.query(`SELECT file_id, "botId", type FROM posts WHERE id=$1`, [postId]);
     const post = rows[0];
     if(!post?.file_id || post?.botId === null){
       return res.status(404).json({error:'Media not ready'});
