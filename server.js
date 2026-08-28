@@ -698,6 +698,14 @@ app.post('/api/post/cdn-finalize', async (req, res) => {
   }
 });
 
+app.post('/api/view', (req, res) => {
+  const { postId, userId, viewerId, viewerIp } = req.body;
+  if (postId && userId) {
+    interactionBuffer.push({ type: 'VIEW', postId, userId, viewerId, viewerIp, timestamp: Date.now() });
+  }
+  res.status(202).json({ buffered: true });
+});
+
 app.post('/api/like', authenticateToken, async (req, res) => {
   const { postId, creatorId } = req.body;
   const actorId = req.user.userId;
