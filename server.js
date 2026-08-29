@@ -654,25 +654,42 @@ app.post('/api/post/upload-video', authenticateToken, upload.single('video'), as
 
 app.post('/api/post/cdn-finalize', async (req, res) => {
   try {
-    const { postId, status, userId, file_id, botId, type, title, caption } = req.body;
+    const { postId, status, userId, file_id, botId, type, title, caption, cdnUrl, b2Url } = req.body;
     if (!postId ||!status ||!userId) return res.status(400).json({ error: 'Missing fields' });
 
     const userDb = getDbShard(userId);
-    console.log(`[CDN CALLBACK] postId:${postId} status:${status} file_id:${file_id}`);
+    console.log(`[CDN CALLBACK] postId:${postId} status:${status} file_id:${file_id} cdnUrl:${cdnUrl}`);
+
+    // Build the real CDN URL. cdn-server should send it. If not, build from b2Url
+    const finalCdnUrl = cdnUrl || `https://f005.backblazeb2.com/file/${process.env.B2_BUCKET_A}/${b2Url}`;
 
     // 1. WORKER FINISHED PROCESSING - SAVE MEDIA NOW
     if (status === 'PENDING_APPROVAL') {
       await db5.query(`
-        UPDATE posts SET status='PENDING_APPROVAL', file_id=$1, "botId"=$2, type=$3, title=$4, caption=$5 WHERE id=$6
-      `, [file_id, botId, type || 'reel', title || '', caption || '', postId]);
+        UPDATE posts SET 
+          status='PENDING_APPROVAL', 
+          file_id=$1, 
+          "botId"=$2, 
+          cdn_url=$3,
+          "mediaUrl"=$3, 
+          type=$4, title=$5, caption=$6 
+        WHERE id=$7
+      `, [file_id, botId, finalCdnUrl, type || 'reel', title || '', caption || '', postId]);
       return res.json({ success: true });
     }
 
     // 2. ADMIN APPROVED
     if (status === 'READY') {
       await db5.query(`
-        UPDATE posts SET status='ACTIVE', file_id=$1, "botId"=$2, type=$3, title=$4, caption=$5 WHERE id=$6
-      `, [file_id, botId, type || 'reel', title || '', caption || '', postId]);
+        UPDATE posts SET 
+          status='ACTIVE', 
+          file_id=$1, 
+          "botId"=$2, 
+          cdn_url=$3,
+          "mediaUrl"=$3, 
+          type=$4, title=$5, caption=$6 
+        WHERE id=$7
+      `, [file_id, botId, finalCdnUrl, type || 'reel', title || '', caption || '', postId]);
       return res.json({ success: true });
     }
 
