@@ -658,13 +658,13 @@ app.post('/api/post/cdn-finalize', async (req, res) => {
     if (!postId ||!status ||!userId) return res.status(400).json({ error: 'Missing fields' });
 
     const userDb = getDbShard(userId);
-    console.log(`[CDN CALLBACK] postId:${postId} status:${status}`);
+    console.log(`[CDN CALLBACK] postId:${postId} status:${status} file_id:${file_id}`);
 
-    // 1. WORKER FINISHED PROCESSING - SEND TO ADMIN QUEUE
+    // 1. WORKER FINISHED PROCESSING - SAVE MEDIA NOW
     if (status === 'PENDING_APPROVAL') {
       await db5.query(`
-        UPDATE posts SET status='PENDING_APPROVAL' WHERE id=$1
-      `, [postId]);
+        UPDATE posts SET status='PENDING_APPROVAL', file_id=$1, "botId"=$2, type=$3, title=$4, caption=$5 WHERE id=$6
+      `, [file_id, botId, type || 'reel', title || '', caption || '', postId]);
       return res.json({ success: true });
     }
 
