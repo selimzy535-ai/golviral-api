@@ -621,35 +621,6 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
   }
 });
 
-
-// NEW: Proxy upload to B2. Bypasses github.io CORS + ISP block
-app.post('/api/post/upload-video', authenticateToken, upload.single('video'), async (req, res) => {
-  try {
-    const { userId } = req.user;
-    const { objectKey, contentType } = req.body;
-    const fileBuffer = req.file.buffer;
-
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-
-    const b2 = getB2Shard(userId);
-
-    console.log(`[B2 UPLOAD] ${userId} -> ${b2.bucket}/${objectKey} size:${fileBuffer.length}`);
-
-    const cmd = new PutObjectCommand({ 
-      Bucket: b2.bucket, 
-      Key: objectKey, 
-      Body: fileBuffer, 
-      ContentType: contentType 
-    });
-    await b2.client.send(cmd);
-
-    res.json({ success: true, objectKey });
-  } catch (err) {
-    console.error('[B2 UPLOAD ERROR]', err.message);
-    res.status(500).json({ error: 'Upload to B2 failed' });
-  }
-});
-
 // ========== CDN FINALIZE CALLBACK FROM golviral-cdn ==========
 
 app.post('/api/post/cdn-finalize', async (req, res) => {
