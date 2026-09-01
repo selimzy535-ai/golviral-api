@@ -595,28 +595,24 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
     if (post.status!== 'PRE_UPLOAD') return res.status(400).json({ error: 'Post already processed' });
 
     // 1. TEXT POSTS: Publish immediately
-    if (post.type === 'novel' || post.type === 'store') {
+    if (post.type === 'novel') {
       await db5.query(`UPDATE posts SET status='ACTIVE', title=$1, content=$2 WHERE id=$3`, [title || '', content || '', postId]);
       return res.json({ message: 'Content published', postId });
     }
 
-    // 2. MEDIA POSTS: story/reel. Send to CDN for processing
+    // 2. ALL MEDIA POSTS: reel, story, store. Just mark as waiting for admin
+    // DO NOT CALL CDN HERE. Admin will trigger it from /api/cdn/approve
     await db5.query(`UPDATE posts SET status='PENDING_APPROVAL', title=$1, content=$2 WHERE id=$3`, [title || '', content || '', postId]);
 
-    // Tell CDN to start processing
-    await axios.post(`${process.env.CDN_URL}/api/cdn/ingest`, {
-      postId, objectKey, userId, b2Shard: post.b2Shard, title: title || '', caption: content || ''
-    }, { headers: { 'x-api-key': process.env.CDN_API_KEY } }).catch(e => console.error('CDN ingest failed', e.message));
-
-    console.log(`[CREATE SUCCESS] Sent to CDN: ${postId}`);
-    res.json({ message: 'Processing started. Will be live after approval.', postId });
+    console.log(`[CREATE SUCCESS] Waiting for  Approval: ${postId}`);
+    res.json({ message: 'Uploaded! Waiting for approval.', postId });
 
   } catch (err) {
     console.error(`[CREATE ERROR] postId:${postId}`, err.message);
     const userDb = getDbShard(userId);
     await db5.query(`UPDATE posts SET status='REJECTED' WHERE id=$1`, [postId]).catch(() => {});
     const refund = (post.type === 'novel' || post.type === 'story' || post.type === 'store')? 10 : 25;
-    await userDb.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: refund } } }).catch(() => {});
+    await userDb.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: refund } }).catch(() => {});
     res.status(500).json({ error: 'Failed to publish post. Credits refunded.' });
   }
 });
