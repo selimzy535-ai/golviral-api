@@ -91,12 +91,12 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
     let pointsToAdd = 0;
 
     switch (action) {
-      case 'LIKE': pointsToAdd = isCreator ? 10 : 1; break;
-      case 'COMMENT': pointsToAdd = isCreator ? 15 : 3; break;
-      case 'VIEW_REEL': pointsToAdd = isCreator ? 2 : 0; break; 
+      case 'LIKE': pointsToAdd = isCreator ? 10 : 0; break;
+      case 'COMMENT': pointsToAdd = isCreator ? 15 : 1; break;
+      case 'VIEW_REEL': pointsToAdd = isCreator ? 1 : 0; break; 
       case 'READ_NOVEL': pointsToAdd = 10; break;
       case 'READ_STORY': pointsToAdd = 10; break;
-      case 'REFERRAL_BONUS': pointsToAdd = 1000; break;
+      case 'REFERRAL_BONUS': pointsToAdd = 100; break;
       case 'GIFT': pointsToAdd = meta.points || 0; break; 
     }
     if (pointsToAdd === 0) return;
