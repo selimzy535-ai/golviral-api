@@ -607,12 +607,12 @@ app.post('/api/post/create', authenticateToken, async (req, res) => {
     console.log(`[CREATE SUCCESS] Waiting for  Approval: ${postId}`);
     res.json({ message: 'Uploaded! Waiting for approval.', postId });
 
-  } catch (err) {
+ } catch (err) {
     console.error(`[CREATE ERROR] postId:${postId}`, err.message);
     const userDb = getDbShard(userId);
     await db5.query(`UPDATE posts SET status='REJECTED' WHERE id=$1`, [postId]).catch(() => {});
     const refund = (post.type === 'novel' || post.type === 'story' || post.type === 'store')? 10 : 25;
-    await userDb.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: refund } }).catch(() => {});
+    await userDb.client.user.update({ where: { id: userId }, data: { freeCredits: { increment: refund } } }).catch(() => {});
     res.status(500).json({ error: 'Failed to publish post. Credits refunded.' });
   }
 });
