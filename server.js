@@ -1173,23 +1173,23 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
 app.get('/api/user/:id', authenticateToken, async (req, res) => {
   try {
     const { id: targetId } = req.params;
-    const meId = req.user.userId;
+    const meId = req.userId;
     const db = getDbShard(targetId);
 
     const user = await db.client.user.findUnique({
       where: { id: targetId },
-      select: { id: true, username: true, createdAt: true, isVerified: true, dmUnlocked: true }
+      select: { id: true, username: true, email: true, createdAt: true, isVerified: true, dmUnlocked: true } // ADDED EMAIL
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     // 1. Get totals from db5 where posts actually live
     const { rows: stats } = await db5.query(
-      `SELECT 
-        COALESCE(SUM(views),0) as views, 
+      `SELECT
+        COALESCE(SUM(views),0) as views,
         COALESCE(SUM(likes),0) as likes,
         COUNT(*) as total
-       FROM posts 
-       WHERE "userId"=$1 AND status='ACTIVE'`, 
+       FROM posts
+       WHERE "userId"=$1 AND status='ACTIVE'`,
       [targetId]
     );
 
@@ -1197,32 +1197,70 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
     const totalLikes = parseInt(stats[0].likes);
     const totalPosts = parseInt(stats[0].total);
 
-    // 2. Followers/Following from db5
+    // 2. Followers/Following count from db5
     const followers = await getTotalFollowers(targetId);
     const following = await getTotalFollowing(targetId);
 
-    // 3. Check if ME follows TARGET - also from db5
+    // 3. Check if ME follows TARGET
     const { rows: followRows } = await db5.query(
       `SELECT 1 FROM follows WHERE "followerId"=$1 AND "followingId"=$2 LIMIT 1`,
       [meId, targetId]
     );
     const isFollowing = followRows.length > 0;
 
+    // 4. GET FOLLOWERS LIST + FOLLOWING LIST
+    const { rows: followerRows } = await db5.query(
+      `SELECT "followerId" FROM follows WHERE "followingId"=$1 LIMIT 100`, // cap at 100
+      [targetId]
+    );
+    const followerIds = followerRows.map(r => r.followerId);
+
+    const { rows: followingRows } = await db5.query(
+      `SELECT "followingId" FROM follows WHERE "followerId"=$1 LIMIT 100`, // cap at 100
+      [targetId]
+    );
+    const followingIds = followingRows.map(r => r.followingId);
+
+    // Fetch usernames for both lists from all 3 shards
+    let followersList = [];
+    let followingList = [];
+    const allIds = [...new Set([...followerIds,...followingIds])];
+    const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
+
+    for(const db of dbs){
+      try {
+        const users = await db.user.findMany({
+          where: { id: { in: allIds } },
+          select: { id: true, username: true, isVerified: true }
+        });
+        followersList.push(...users.filter(u => followerIds.includes(u.id)));
+        followingList.push(...users.filter(u => followingIds.includes(u.id)));
+      } catch(e){}
+    }
+    // Dedupe in case user exists in 2 shards
+    followersList = [...new Map(followersList.map(u => [u.id, u])).values()];
+    followingList = [...new Map(followingList.map(u => [u.id, u])).values()];
+
     const monetized = await isUserMonetized(targetId);
     const profile = await profilePool.query(`SELECT bio FROM profiles WHERE user_id=$1`, [targetId]).catch(()=>({rows:[]}));
+
+    const isMe = meId === targetId;
 
     res.json({
       userId: targetId,
       username: user.username,
+      email: isMe? user.email : null, // ONLY SHOW EMAIL TO SELF
       bio: profile.rows[0]?.bio || "",
       isVerified: user.isVerified || monetized,
       dmUnlocked: user.dmUnlocked || monetized,
-      totalViews, 
-      totalLikes, 
-      totalPosts, // fixed
-      followers, 
-      following, 
+      totalViews,
+      totalLikes,
+      totalPosts, // <-- POST TOTAL
+      followers,
+      following,
       isFollowing,
+      followersList, // <-- ARRAY OF {id, username, isVerified}
+      followingList, // <-- ARRAY OF {id, username, isVerified}
       profileLink: `${APP_BASE_URL}/u/${targetId}`,
       referralLink: `${APP_BASE_URL}/auth.html?ref=${targetId}`
     });
