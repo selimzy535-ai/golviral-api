@@ -1705,19 +1705,20 @@ async function sendNotification(userId, type, title, body, data = {}) {
 }
 
 // ========== ENDPOINT 1: PROFILE POSTS ==========
-app.get('/api/user/:id/posts', async (req, res) => { 
+app.get('/api/user/:id/posts', authenticateToken, async (req, res) => { 
   try {
     const { id: targetId } = req.params; 
     const { page = 1, limit = 12 } = req.query; 
     
     const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(50, parseInt(limit) || 12); // cap at 50
+    const limitNum = Math.min(50, parseInt(limit) || 12);
     const offset = (pageNum - 1) * limitNum;
 
     const { rows } = await db5.query(
-      `SELECT * FROM posts 
+      `SELECT id, "userId", type, title, caption, cdn_url, file_id, "botId", views, likes, "createdAt" 
+       FROM posts 
        WHERE "userId"=$1 
-         AND status IN ('ACTIVE','ARCHIVED') 
+         AND status='ACTIVE' 
        ORDER BY "createdAt" DESC 
        LIMIT $2 OFFSET $3`, 
       [targetId, limitNum, offset] 
