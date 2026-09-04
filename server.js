@@ -886,7 +886,6 @@ app.post('/api/gift/init', authenticateToken, async (req, res) => {
   if(!pack) return res.status(400).json({error:"Invalid gift"});
 
   const redis = getRedisShard(userId);
-  // LOCK: same user + same gift type = 60 sec block
   const lockKey = `lock:gift:${userId}:${giftType}`;
   const hasLock = await redis.set(lockKey, '1', 'EX', 60, 'NX').catch(()=>null);
   if(!hasLock) return res.status(429).json({error: "Please wait, processing your last request"});
@@ -897,31 +896,45 @@ app.post('/api/gift/init', authenticateToken, async (req, res) => {
     DIAMOND: SELAR_LINKS.GIFT_DIAMOND
   }
 
-  const db = getDbShard(userId);
-  // Extra check: if PENDING ticket already exists for same type in last 2 mins, reuse it
-  const existing = await db.client.deposit.findFirst({
-    where: { userId, status: 'PENDING', meta: `GIFT_${giftType}`, expiresAt: {gt: new Date()} },
-    orderBy: { createdAt: 'desc' }
-  });
-  if(existing){
+  try {
+    const db = getDbShard(userId);
+    const existing = await db.client.deposit.findFirst({
+      where: { userId, status: 'PENDING', meta: `GIFT_${giftType}`, expiresAt: {gt: new Date()} },
+      orderBy: { createdAt: 'desc' }
+    });
+    if(existing){
+      await redis.del(lockKey).catch(()=>{});
+      return res.json({ selarLink: `${giftLinks[giftType]}?custom_field_1=${existing.token}`, token: existing.token });
+    }
+
+    const token = crypto.randomBytes(16).toString('hex');
+    await db.client.deposit.create({
+      data: {
+        id: crypto.randomBytes(8).toString('hex'),
+        userId,
+        amountNaira: pack.ngn,
+        points: pack.points,
+        token,
+        reference: null, // <-- FIX CRASH
+        status: 'PENDING',
+        meta: `GIFT_${giftType}`,
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000)
+      }
+    });
+
     await redis.del(lockKey).catch(()=>{});
-    return res.json({ selarLink: `${giftLinks[giftType]}?custom_field_1=${existing.token}`, token: existing.token });
+    res.json({ selarLink: `${giftLinks[giftType]}?custom_field_1=${token}`, token });
+  } catch(e){
+    await redis.del(lockKey).catch(()=>{});
+    console.error(e);
+    res.status(500).json({error:"Gift init failed"});
   }
-
-  const token = crypto.randomBytes(16).toString('hex');
-  await db.client.deposit.create({
-    data: { id: crypto.randomBytes(8).toString('hex'), userId, amountNaira: pack.ngn, points: pack.points, token, status: 'PENDING', meta: `GIFT_${giftType}`, expiresAt: new Date(Date.now() + 30 * 60 * 1000) }
-  });
-
-  await redis.del(lockKey).catch(()=>{});
-  res.json({ selarLink: `${giftLinks[giftType]}?custom_field_1=${token}`, token });
 });
 
 app.post('/api/boost/init', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
     const { postId, tierAmount } = req.body;
-
     const validTiers = {
       3500: { days: 1, link: SELAR_LINKS.BOOST_1D },
       7500: { days: 3, link: SELAR_LINKS.BOOST_3D },
@@ -931,13 +944,11 @@ app.post('/api/boost/init', authenticateToken, async (req, res) => {
     if (!tier) return res.status(400).json({ error: 'Invalid boost tier' });
 
     const redis = getRedisShard(userId);
-    // LOCK: same user + same post + same tier = 60 sec block
     const lockKey = `lock:boost:${userId}:${postId}:${tierAmount}`;
     const hasLock = await redis.set(lockKey, '1', 'EX', 60, 'NX').catch(()=>null);
     if(!hasLock) return res.status(429).json({error: "Please wait, processing your last request"});
 
     const db = getDbShard(userId);
-    // Check if same post already has PENDING boost in last 2 mins
     const existing = await db.client.deposit.findFirst({
       where: { userId, status: 'PENDING', meta: `BOOST_${postId}_${tierAmount}`, expiresAt: {gt: new Date()} },
       orderBy: { createdAt: 'desc' }
@@ -952,7 +963,10 @@ app.post('/api/boost/init', authenticateToken, async (req, res) => {
       data: {
         id: crypto.randomBytes(8).toString('hex'),
         userId, amountNaira: tierAmount, points: 0,
-        token, status: 'PENDING', meta: `BOOST_${postId}_${tierAmount}`,
+        token,
+        reference: null, // <-- FIX CRASH
+        status: 'PENDING',
+        meta: `BOOST_${postId}_${tierAmount}`,
         expiresAt: new Date(Date.now() + 30 * 60 * 1000)
       }
     });
@@ -960,6 +974,7 @@ app.post('/api/boost/init', authenticateToken, async (req, res) => {
     await redis.del(lockKey).catch(()=>{});
     res.json({ selarLink: `${tier.link}?custom_field_1=${token}&custom_field_2=${postId}`, token });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Boost init failed' });
   }
 });
