@@ -53,9 +53,9 @@ model Deposit {
   amountNaira Int
   points Int
   token String @unique
-  reference String @unique @default("")
+  reference String? @unique
   status String @default("PENDING")
-  meta String @default("DEPOSIT") @db.VarChar(50) // DEPOSIT, DM_UNLOCK, GIFT_RUBY, BOOST_postId_3500
+  meta String @default("DEPOSIT") @db.VarChar(50)
   createdAt DateTime @default(now())
   expiresAt DateTime
 
