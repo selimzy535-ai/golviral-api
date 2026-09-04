@@ -34,6 +34,15 @@ const allowedOrigins = [
   'https://golviral.com'
 ];
 
+const SELAR_LINKS = {
+  GIFT_RUBY: 'https://selar.com/17448y2c88',
+  GIFT_GOLD: 'https://selar.com/o50444f04k',
+  GIFT_DIAMOND: 'https://selar.com/98wzs9vj88',
+  BOOST_1D: 'https://selar.com/nv4w18r91z',
+  BOOST_3D: 'https://selar.com/psy3f911h3',
+  BOOST_7D: 'https://selar.com/cak3557895',
+}
+
 console.log(`[INIT] GolViral v5.1 Hardened Core Stack Engine...`);
 console.log(`[CONFIG] APP_BASE_URL: ${APP_BASE_URL}`);
 
