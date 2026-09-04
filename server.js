@@ -1177,7 +1177,7 @@ app.get('/api/wallet', authenticateToken, async (req, res) => {
 app.get('/api/user/:id', authenticateToken, async (req, res) => {
   try {
     const { id: targetId } = req.params;
-    const meId = req.userId;
+    const meId = req.user.userId;
     const db = getDbShard(targetId);
 
     const user = await db.client.user.findUnique({
