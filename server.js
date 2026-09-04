@@ -869,109 +869,89 @@ const GIFT_PACKS = {
   DIAMOND: { ngn: 15000, points: 1000, giftsTotal: 100 }
 };
 
-app.post('/api/deposit/init', authenticateToken, async (req, res) => {
+
+app.post('/api/gift/init', authenticateToken, async (req, res) => {
+  const { userId } = req.user;
+  const { giftType } = req.body;
+  const pack = GIFT_PACKS[giftType];
+  if(!pack) return res.status(400).json({error:"Invalid gift"});
+
+  const redis = getRedisShard(userId);
+  // LOCK: same user + same gift type = 60 sec block
+  const lockKey = `lock:gift:${userId}:${giftType}`;
+  const hasLock = await redis.set(lockKey, '1', 'EX', 60, 'NX').catch(()=>null);
+  if(!hasLock) return res.status(429).json({error: "Please wait, processing your last request"});
+
+  const giftLinks = {
+    RUBY: SELAR_LINKS.GIFT_RUBY,
+    GOLD: SELAR_LINKS.GIFT_GOLD,
+    DIAMOND: SELAR_LINKS.GIFT_DIAMOND
+  }
+
+  const db = getDbShard(userId);
+  // Extra check: if PENDING ticket already exists for same type in last 2 mins, reuse it
+  const existing = await db.client.deposit.findFirst({
+    where: { userId, status: 'PENDING', meta: `GIFT_${giftType}`, expiresAt: {gt: new Date()} },
+    orderBy: { createdAt: 'desc' }
+  });
+  if(existing){
+    await redis.del(lockKey).catch(()=>{});
+    return res.json({ selarLink: `${giftLinks[giftType]}?custom_field_1=${existing.token}`, token: existing.token });
+  }
+
+  const token = crypto.randomBytes(16).toString('hex');
+  await db.client.deposit.create({
+    data: { id: crypto.randomBytes(8).toString('hex'), userId, amountNaira: pack.ngn, points: pack.points, token, status: 'PENDING', meta: `GIFT_${giftType}`, expiresAt: new Date(Date.now() + 30 * 60 * 1000) }
+  });
+
+  await redis.del(lockKey).catch(()=>{});
+  res.json({ selarLink: `${giftLinks[giftType]}?custom_field_1=${token}`, token });
+});
+
+app.post('/api/boost/init', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
-    const { tierAmount } = req.body; 
+    const { postId, tierAmount } = req.body;
 
-    // Buy Points tiers via Selar
-    const tiers = {
-      1500: 15000, 
-      7000: 70000 
+    const validTiers = {
+      3500: { days: 1, link: SELAR_LINKS.BOOST_1D },
+      7500: { days: 3, link: SELAR_LINKS.BOOST_3D },
+      17000: { days: 7, link: SELAR_LINKS.BOOST_7D }
     };
+    const tier = validTiers[tierAmount];
+    if (!tier) return res.status(400).json({ error: 'Invalid boost tier' });
 
-    const points = tiers[tierAmount];
-    if (!points) return res.status(400).json({ error: 'Invalid tier amount. Only 1500 or 7000 allowed' });
+    const redis = getRedisShard(userId);
+    // LOCK: same user + same post + same tier = 60 sec block
+    const lockKey = `lock:boost:${userId}:${postId}:${tierAmount}`;
+    const hasLock = await redis.set(lockKey, '1', 'EX', 60, 'NX').catch(()=>null);
+    if(!hasLock) return res.status(429).json({error: "Please wait, processing your last request"});
+
+    const db = getDbShard(userId);
+    // Check if same post already has PENDING boost in last 2 mins
+    const existing = await db.client.deposit.findFirst({
+      where: { userId, status: 'PENDING', meta: `BOOST_${postId}_${tierAmount}`, expiresAt: {gt: new Date()} },
+      orderBy: { createdAt: 'desc' }
+    });
+    if(existing){
+      await redis.del(lockKey).catch(()=>{});
+      return res.json({ selarLink: `${tier.link}?custom_field_1=${existing.token}&custom_field_2=${postId}`, token: existing.token });
+    }
 
     const token = crypto.randomBytes(16).toString('hex');
-    const db = getDbShard(userId);
-
     await db.client.deposit.create({
       data: {
         id: crypto.randomBytes(8).toString('hex'),
-        userId,
-        amountNaira: tierAmount,
-        points,
-        token,
-        status: 'PENDING',
-        meta: 'DEPOSIT', 
+        userId, amountNaira: tierAmount, points: 0,
+        token, status: 'PENDING', meta: `BOOST_${postId}_${tierAmount}`,
         expiresAt: new Date(Date.now() + 30 * 60 * 1000)
       }
     });
 
-    res.json({
-      selarLink: `https://selar.co/m/YOUR_STORE_SLUG/${tierAmount}`,
-      token
-    });
+    await redis.del(lockKey).catch(()=>{});
+    res.json({ selarLink: `${tier.link}?custom_field_1=${token}&custom_field_2=${postId}`, token });
   } catch (err) {
-    console.error('[Deposit Init Error]', err.message);
-    res.status(500).json({ error: 'Deposit init failed' });
-  }
-});
-
-app.post('/api/dm/init', authenticateToken, async (req, res) => {
-  const { userId } = req.user; 
-  const token = crypto.randomBytes(16).toString('hex');
-  const db = getDbShard(userId);
-  await db.client.deposit.create({ data: { id: crypto.randomBytes(8).toString('hex'), userId, amountNaira: 3000, points: 0, token, status: 'PENDING', meta: 'DM_UNLOCK', expiresAt: new Date(Date.now() + 30 * 60 * 1000) } });
-  res.json({ selarLink: `https://selar.co/m/YOUR_STORE_SLUG/3000`, token });
-});
-
-app.post('/api/gift/init', authenticateToken, async (req, res) => {
-  const { userId } = req.user; const { giftType } = req.body;
-  const pack = GIFT_PACKS[giftType];
-  if(!pack) return res.status(400).json({error:"Invalid gift"});
-  const token = crypto.randomBytes(16).toString('hex'); const db = getDbShard(userId);
-  await db.client.deposit.create({ data: { id: crypto.randomBytes(8).toString('hex'), userId, amountNaira: pack.ngn, points: pack.points, token, status: 'PENDING', meta: `GIFT_${giftType}`, expiresAt: new Date(Date.now() + 30 * 60 * 1000) } });
-  res.json({ selarLink: `https://selar.co/m/YOUR_STORE_SLUG/${pack.ngn}`, token });
-});
-
-// V5.1 Boost Initiation Engine
-app.post('/api/boost/init', authenticateToken, async (req, res) => {
-  try {
-    const { userId } = req.user;
-    const { postId, tierAmount } = req.body; // 3500, 7500, 17000 Naira
-
-    const validTiers = {
-      3500: 1,   // 1 Day Boost
-      7500: 3,   // 3 Days Boost
-      17000: 7   // 7 Days Boost
-    };
-
-    if (!validTiers[tierAmount]) {
-      return res.status(400).json({ error: 'Invalid boost tier amount. Choose 3500, 7500, or 17000' });
-    }
-
-    const postContext = await findPostAcrossShards(postId);
-    if (!postContext) return res.status(404).json({ error: 'Post not found across network shards' });
-
-    if (postContext.post.userId !== userId) {
-      return res.status(403).json({ error: 'Cannot boost another user\'s post' });
-    }
-
-    const token = crypto.randomBytes(16).toString('hex');
-    const db = getDbShard(userId);
-
-    await db.client.deposit.create({
-      data: {
-        id: crypto.randomBytes(8).toString('hex'),
-        userId,
-        amountNaira: tierAmount,
-        points: 0,
-        token,
-        status: 'PENDING',
-        meta: `BOOST_${postId}_${tierAmount}`,
-        expiresAt: new Date(Date.now() + 30 * 60 * 1000) // 30min checkout hold
-      }
-    });
-
-    res.json({
-      selarLink: `https://selar.co/m/YOUR_STORE_SLUG/${tierAmount}`,
-      token
-    });
-  } catch (err) {
-    console.error('[Boost Init Error]', err.message);
-    res.status(500).json({ error: 'Boost deployment initialization failed' });
+    res.status(500).json({ error: 'Boost init failed' });
   }
 });
 
