@@ -1,7 +1,7 @@
-
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const axios = require('axios');
 
 // Import all 4 shards
 const { profilePool, prismaClients, getDbShard, processWalletTransaction } = require('../utils/shard');
@@ -9,15 +9,33 @@ const { profilePool, prismaClients, getDbShard, processWalletTransaction } = req
 // DB4 POOL = raw pg Pool
 const db4 = profilePool;
 
+const CDN_URL = process.env.CDN_URL || process.env.MAIN_CDN_URL;
+const CDN_API_KEY = process.env.CDN_API_KEY;
+
 // ========== HELPERS ==========
 async function getProfile(userId) {
   const { rows } = await db4.query(
     `SELECT user_id, bio, face_hash, face_verified, id_hash, id_verified, id_verified_at,
-            id_photo_temp, id_status, created_at, updated_at
+            id_photo_temp, id_status, created_at, updated_at,
+            avatar_file_id, avatar_bot_id, avatar_updated_at
      FROM profiles WHERE user_id=$1`,
     [userId]
   );
   return rows[0];
+}
+
+async function getAvatarUrl(profile) {
+  if (!profile?.avatar_file_id) return null;
+  try {
+    const r = await axios.get(`${CDN_URL}/api/cdn/refresh`, {
+      params: { file_id: profile.avatar_file_id, botId: profile.avatar_bot_id || 0 },
+      headers: { 'x-api-key': CDN_API_KEY }
+    });
+    return r.data.url;
+  } catch (e) {
+    console.log('[Avatar Refresh Fail]', e.message);
+    return null;
+  }
 }
 
 // ========== AUTH MIDDLEWARE ==========
@@ -72,7 +90,7 @@ router.post('/bio', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
     const { bio } = req.body;
-    if (typeof bio !== 'string') return res.status(400).json({ error: 'Bio must be text' });
+    if (typeof bio!== 'string') return res.status(400).json({ error: 'Bio must be text' });
     const cleanBio = bio.slice(0, 150).trim();
 
     await db4.query(`
@@ -100,19 +118,50 @@ router.delete('/bio', authenticateToken, async (req, res) => {
   }
 });
 
+// ========== NEW ROUTE 2.5: INTERNAL SAVE AVATAR FROM CDN ==========
+router.post('/avatar-save', async (req, res) => {
+  const key = req.headers['x-api-key'];
+  if (key!== CDN_API_KEY) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    const { userId, file_id, botId } = req.body;
+    if (!userId ||!file_id) return res.status(400).json({ error: 'Missing fields' });
+    await db4.query(`
+      INSERT INTO profiles(user_id, avatar_file_id, avatar_bot_id, avatar_updated_at)
+      VALUES($1,$2,$3,NOW())
+      ON CONFLICT (user_id) DO UPDATE SET avatar_file_id=$2, avatar_bot_id=$3, avatar_updated_at=NOW()
+    `, [userId, file_id, botId || 0]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Avatar Save Error]', err.message);
+    res.status(500).json({ error: 'Failed to save avatar' });
+  }
+});
+
+// ========== NEW ROUTE 2.6: DELETE AVATAR ==========
+router.delete('/avatar', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.user;
+    await db4.query(`UPDATE profiles SET avatar_file_id=NULL, avatar_bot_id=NULL, avatar_updated_at=NOW() WHERE user_id=$1`, [userId]);
+    res.json({ success: true, avatarUrl: null });
+  } catch (err) {
+    console.error('[Delete Avatar Error]', err.message);
+    res.status(500).json({ error: 'Failed to delete avatar' });
+  }
+});
+
 // ========== ROUTE 3: FACE VERIFY ==========
 router.post('/face-verify', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
     const { faceHash } = req.body;
 
-    if (!faceHash || faceHash.length !== 64) {
+    if (!faceHash || faceHash.length!== 64) {
       return res.status(400).json({ error: 'Invalid faceHash' });
     }
 
     // Check duplicate in DB4
     const dup = await db4.query(`SELECT user_id FROM profiles WHERE face_hash=$1`, [faceHash]);
-    if (dup.rows.length > 0 && dup.rows[0].user_id !== userId) {
+    if (dup.rows.length > 0 && dup.rows[0].user_id!== userId) {
       return res.status(400).json({ error: "This face is already registered to another account" });
     }
 
@@ -160,7 +209,7 @@ router.post('/id-upload', authenticateToken, async (req, res) => {
     const { userId } = req.user;
     const { idPhotoBase64 } = req.body;
 
-    if (!idPhotoBase64 || !idPhotoBase64.startsWith('data:image')) {
+    if (!idPhotoBase64 ||!idPhotoBase64.startsWith('data:image')) {
       return res.status(400).json({ error: 'Invalid image data' });
     }
     if (idPhotoBase64.length > 2 * 1024 * 1024) {
@@ -186,9 +235,11 @@ router.get('/kyc-status', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
     const profile = await getProfile(userId);
+    const avatarUrl = await getAvatarUrl(profile);
 
     res.json({
       bio: profile?.bio || "",
+      avatarUrl: avatarUrl || null,
       faceVerified: profile?.face_verified || false,
       idVerified: profile?.id_verified || false,
       idStatus: profile?.id_status || 'NONE',
@@ -206,9 +257,11 @@ router.get('/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
     const profile = await getProfile(userId);
+    const avatarUrl = await getAvatarUrl(profile);
     res.json({
       userId,
       bio: profile?.bio || "",
+      avatarUrl: avatarUrl || null,
       isVerified: profile?.face_verified || false,
       joinedAt: profile?.created_at || null
     });
@@ -219,4 +272,3 @@ router.get('/:userId', async (req, res) => {
 });
 
 module.exports = { router, requireFaceVerified, requireIdVerified };
-
