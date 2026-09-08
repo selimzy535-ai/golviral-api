@@ -691,27 +691,51 @@ app.post('/api/post/cdn-finalize', async (req, res) => {
   }
 });
 
-app.post('/api/view', (req, res) => {
-  const { postId, userId, viewerId, viewerIp } = req.body;
-  if (postId && userId) {
+// ========== FIXED VIEW - with 5 min dedup per viewerIp/viewerId ==========
+app.post('/api/view', async (req, res) => {
+  try {
+    const { postId, userId, viewerId, viewerIp } = req.body;
+    if (!postId ||!userId) return res.status(202).json({ buffered: true });
+
+    // dedup key: 1 view per IP/user per post per 5 minutes
+    const dedupId = viewerId || viewerIp || 'anon';
+    const redis = redisClients.redis1;
+    const dedupKey = `view:${postId}:${dedupId}`;
+    const already = await redis.get(dedupKey).catch(()=>null);
+    if (already) return res.status(202).json({ buffered: true, dedup: true });
+
+    await redis.set(dedupKey, '1', 'EX', 300).catch(()=>{}); // 5 min
+
     interactionBuffer.push({ type: 'VIEW', postId, userId, viewerId, viewerIp, timestamp: Date.now() });
-  }
-  res.status(202).json({ buffered: true });
+    res.status(202).json({ buffered: true });
+  } catch { res.status(202).json({ buffered: true }); }
 });
 
+// ========== FIXED LIKE - no overcount ==========
 app.post('/api/like', authenticateToken, async (req, res) => {
-  const { postId, creatorId } = req.body;
-  const actorId = req.user.userId;
-  await db5.query(`
-    INSERT INTO likes(id, "postId", "userId", "creatorId")
-    VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING
-  `, [crypto.randomBytes(8).toString('hex'), postId, actorId, creatorId]);
+  try {
+    const { postId, creatorId } = req.body;
+    const actorId = req.user.userId;
+    const likeId = crypto.randomBytes(8).toString('hex');
 
-  await db5.query(`UPDATE posts SET likes = likes + 1 WHERE id = $1`, [postId]);
-  interactionBuffer.push({ type: 'LIKE', postId, userId: creatorId, actorId, timestamp: Date.now() });
-  res.status(202).json({ buffered: true });
+    const result = await db5.query(`
+      INSERT INTO likes(id, "postId", "userId", "creatorId")
+      VALUES($1,$2,$3,$4) ON CONFLICT ("postId","userId") DO NOTHING RETURNING id
+    `, [likeId, postId, actorId, creatorId]);
+
+    if (result.rowCount > 0) {
+      await db5.query(`UPDATE posts SET likes = likes + 1 WHERE id = $1`, [postId]);
+      interactionBuffer.push({ type: 'LIKE', postId, userId: creatorId, actorId, timestamp: Date.now() });
+    }
+
+    res.status(202).json({ liked: result.rowCount > 0 });
+  } catch (err) {
+    console.error('[Like Error]', err.message);
+    res.status(500).json({ error: 'Like failed' });
+  }
 });
 
+// ========== FIXED COMMENT - increments comments count ==========
 app.post('/api/comment', authenticateToken, async (req, res) => {
   try {
     const { postId, creatorId, text } = req.body;
@@ -723,20 +747,21 @@ app.post('/api/comment', authenticateToken, async (req, res) => {
     const redis = getRedisShard(actorId);
     const cooldown = await redis.get(`cool:comment:${actorId}`).catch(() => null);
     if (cooldown) return res.status(429).json({ error: 'Comment cooldown active' });
-    await redis.set(`cool:comment:${actorId}`, '1', 'EX', 120).catch(() => {});
+    await redis.set(`cool:comment:${actorId}`, '1', 'EX', 15).catch(() => {});
 
     const commentId = crypto.randomBytes(8).toString('hex');
     await db5.query(
       `INSERT INTO comments(id, "postId", "userId", text) VALUES($1,$2,$3,$4)`,
       [commentId, postId, actorId, text.trim().slice(0, 500)]
     );
+    await db5.query(`UPDATE posts SET comments = comments + 1 WHERE id = $1`, [postId]);
 
     const actorDb = getDbShard(actorId);
     const actorUser = await actorDb.client.user.findUnique({where:{id:actorId}});
-    sendNotification(creatorId, 'COMMENT', 'New Comment', `${actorUser.username} commented: ${text.slice(0,40)}`);
+    if (actorUser) sendNotification(creatorId, 'COMMENT', 'New Comment', `${actorUser.username} commented: ${text.slice(0,40)}`);
 
     interactionBuffer.push({ type: 'COMMENT', postId, userId: creatorId, actorId, timestamp: Date.now() });
-    res.status(201).json({ success: true });
+    res.status(201).json({ success: true, commentId });
   } catch (err) {
     console.error('[Comment Error]', err.message);
     res.status(500).json({ error: 'Comment failed' });
