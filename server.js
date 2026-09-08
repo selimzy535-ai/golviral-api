@@ -1182,11 +1182,10 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
 
     const user = await db.client.user.findUnique({
       where: { id: targetId },
-      select: { id: true, username: true, email: true, createdAt: true, isVerified: true, dmUnlocked: true } // ADDED EMAIL
+      select: { id: true, username: true, email: true, createdAt: true, isVerified: true, dmUnlocked: true }
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    // 1. Get totals from db5 where posts actually live
     const { rows: stats } = await db5.query(
       `SELECT
         COALESCE(SUM(views),0) as views,
@@ -1201,39 +1200,35 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
     const totalLikes = parseInt(stats[0].likes);
     const totalPosts = parseInt(stats[0].total);
 
-    // 2. Followers/Following count from db5
     const followers = await getTotalFollowers(targetId);
     const following = await getTotalFollowing(targetId);
 
-    // 3. Check if ME follows TARGET
     const { rows: followRows } = await db5.query(
       `SELECT 1 FROM follows WHERE "followerId"=$1 AND "followingId"=$2 LIMIT 1`,
       [meId, targetId]
     );
     const isFollowing = followRows.length > 0;
 
-    // 4. GET FOLLOWERS LIST + FOLLOWING LIST
     const { rows: followerRows } = await db5.query(
-      `SELECT "followerId" FROM follows WHERE "followingId"=$1 LIMIT 100`, // cap at 100
+      `SELECT "followerId" FROM follows WHERE "followingId"=$1 LIMIT 100`,
       [targetId]
     );
     const followerIds = followerRows.map(r => r.followerId);
 
     const { rows: followingRows } = await db5.query(
-      `SELECT "followingId" FROM follows WHERE "followerId"=$1 LIMIT 100`, // cap at 100
+      `SELECT "followingId" FROM follows WHERE "followerId"=$1 LIMIT 100`,
       [targetId]
     );
     const followingIds = followingRows.map(r => r.followingId);
 
-    // Fetch usernames for both lists from all 3 shards
     let followersList = [];
     let followingList = [];
     const allIds = [...new Set([...followerIds,...followingIds])];
     const dbs = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
 
-    for(const db of dbs){
+    for(const dbShard of dbs){
       try {
-        const users = await db.user.findMany({
+        const users = await dbShard.user.findMany({
           where: { id: { in: allIds } },
           select: { id: true, username: true, isVerified: true }
         });
@@ -1241,30 +1236,55 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
         followingList.push(...users.filter(u => followingIds.includes(u.id)));
       } catch(e){}
     }
-    // Dedupe in case user exists in 2 shards
     followersList = [...new Map(followersList.map(u => [u.id, u])).values()];
     followingList = [...new Map(followingList.map(u => [u.id, u])).values()];
 
     const monetized = await isUserMonetized(targetId);
-    const profile = await profilePool.query(`SELECT bio FROM profiles WHERE user_id=$1`, [targetId]).catch(()=>({rows:[]}));
+
+    // ===== FIXED: GET BIO + AVATAR WITH REFRESH =====
+    let bio = "";
+    let avatarUrl = null;
+    try {
+      const { rows: profRows } = await profilePool.query(
+        `SELECT bio, avatar_file_id, avatar_bot_id FROM profiles WHERE user_id=$1`,
+        [targetId]
+      );
+      const prof = profRows[0];
+      if (prof) {
+        bio = prof.bio || "";
+        if (prof.avatar_file_id && process.env.CDN_URL && process.env.CDN_API_KEY) {
+          try {
+            const r = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh`, {
+              params: { file_id: prof.avatar_file_id, botId: prof.avatar_bot_id || 0 },
+              headers: { 'x-api-key': process.env.CDN_API_KEY },
+              timeout: 4000
+            });
+            avatarUrl = r.data.url || null;
+          } catch (e) {
+            console.log('[Avatar Refresh Fail]', e.message);
+          }
+        }
+      }
+    } catch (e) {}
 
     const isMe = meId === targetId;
 
     res.json({
       userId: targetId,
       username: user.username,
-      email: isMe? user.email : null, // ONLY SHOW EMAIL TO SELF
-      bio: profile.rows[0]?.bio || "",
+      email: isMe? user.email : null,
+      bio: bio,
+      avatarUrl: avatarUrl,
       isVerified: user.isVerified || monetized,
       dmUnlocked: user.dmUnlocked || monetized,
       totalViews,
       totalLikes,
-      totalPosts, // <-- POST TOTAL
+      totalPosts,
       followers,
       following,
       isFollowing,
-      followersList, // <-- ARRAY OF {id, username, isVerified}
-      followingList, // <-- ARRAY OF {id, username, isVerified}
+      followersList,
+      followingList,
       profileLink: `${APP_BASE_URL}/u/${targetId}`,
       referralLink: `${APP_BASE_URL}/auth.html?ref=${targetId}`
     });
