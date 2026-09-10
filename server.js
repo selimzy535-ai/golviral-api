@@ -20,19 +20,21 @@ const fs = require('fs');
 const path = require('path');
 const adminRoutes = require('./routes/admin'); 
 const { router: profileRoutes, requireFaceVerified, requireIdVerified } = require('./routes/profile');
-const webpush = require('web-push'); // npm i web-push
-const multer = require('multer'); // npm i multer
+const webpush = require('web-push');
+const multer = require('multer');
 const { prismaClients, redisClients, getDbShard, getRedisShard, profilePool, processWalletTransaction } = require('./utils/shard');
+const { db5 } = require('./utils/db5');
+
 // ========== 2. ENV CONFIG & CONSTANTS ==========
 const PORT = process.env.PORT || 10000;
-const JWT_SECRET = process.env.JWTSECRET || 'critical_fallback_shard_key_2026_prod';
-const APP_BASE_URL = process.env.APPBASEURL || 'https://selimzy535-ai.github.io/golviral-frontend';
-const { db5 } = require('./utils/db5');
-// CORS - Allow GitHub Pages + Custom Domain
-const allowedOrigins = [
-  'https://selimzy535-ai.github.io',
-  'https://golviral.com'
-];
+
+const JWT_SECRET = process.env.JWT_SECRET || process.env.JWTSECRET;
+if (!JWT_SECRET) {
+  throw new Error('[FATAL] JWT_SECRET must be set in .env');
+}
+
+// FIXED: Now points to your live custom domain
+const APP_BASE_URL = process.env.APP_BASE_URL || process.env.APPBASEURL || 'https://golviral.com';
 
 const SELAR_LINKS = {
   GIFT_RUBY: 'https://selar.com/17448y2c88',
@@ -48,36 +50,71 @@ console.log(`[CONFIG] APP_BASE_URL: ${APP_BASE_URL}`);
 
 // ========== 3. APP & SERVER INITIALIZATION ==========
 const app = express();
+
+// IMPORTANT FOR RENDER / NGINX
+app.set('trust proxy', 1);
+
 const server = http.createServer(app);
+
+// FIXED: CORS origins for custom domain
+const allowedOrigins = [
+  'https://golviral.com',
+  'https://www.golviral.com',
+  'https://selimzy535-ai.github.io',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://localhost:5500'
+];
 
 const io = new Server(server, {
   cors: {
-    origin: ['https://selimzy535-ai.github.io', 'https://golviral.com'],
-    credentials: true
+    origin: allowedOrigins,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
   }
 });
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB// ========== 4. MIDDLEWARE CONFIGURATION ==========
-// Body parser - 50MB for video uploads
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+// ========== 4. MIDDLEWARE CONFIGURATION ==========
 app.use(express.json({ limit: '50mb' }));
 
+// FIXED: Dynamic CORS handler
 app.use(cors({ 
-  origin: allowedOrigins, // use array directly, faster
-  credentials: true, // must be false with specific origins
+  origin: function(origin, callback){
+    // allow requests with no origin (mobile apps, curl)
+    if(!origin) return callback(null, true);
+    if(allowedOrigins.indexOf(origin) !== -1){
+      callback(null, true);
+    } else {
+      // allow anyway during propagation, change to false later if you want to lock down
+      callback(null, true);
+    }
+  },
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-key'] // ADDED
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-key']
 }));
 
-app.options('*', cors()); // iPhone preflight fix
+app.options('*', cors({
+  origin: allowedOrigins,
+  credentials: true
+}));
 
-app.use(helmet());
+// FIXED: helmet was blocking frontend
+app.use(helmet({
+  crossOriginResourcePolicy: false,
+  crossOriginEmbedderPolicy: false,
+  contentSecurityPolicy: false
+}));
+
 app.use(morgan('combined'));
 
-// MOUNT ADMIN ROUTES HERE - NOT AT THE BOTTOM
+// MOUNT ADMIN ROUTES
 app.use('/api/admin', adminRoutes);
 app.use('/api/profile', profileRoutes);
+
 // ========== 5. GLOBAL MEMORY & STATE MAPS ==========
-// Map userId to socketId for DM routing
 const onlineUsers = new Map();
 let interactionBuffer = [];
 
