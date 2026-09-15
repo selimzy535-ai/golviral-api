@@ -217,34 +217,40 @@ async function isUserMonetized(userId) {
   }
   return false;
 }
-// ========== EMAIL ENGINE ==========
+// ========== EMAIL ENGINE - BREVO API + RESEND FALLBACK ==========
 async function sendEmail(to, subject, html) {
-  if (!to) return console.error('[Email Engine Error] Recipient field undefined.');
-  const mailOptions = { from: process.env.BREVO_USER || 'noreply@golviral.com', to, subject, html };
+  if (!to) return console.error('[Email Engine Error] Recipient undefined');
+  const from = process.env.BREVO_USER || 'noreply@golviral.com';
   
   try {
-    if (!process.env.BREVO_USER || !process.env.BREVO_PASS) {
-      throw new Error('Primary Brevo configurations are missing');
-    }
-    const brevo = nodemailer.createTransport({
-      host: 'smtp-relay.brevo.com',
-      port: 587,
-      auth: { user: process.env.BREVO_USER, pass: process.env.BREVO_PASS }
+    const brevoApiKey = process.env.BREVO_API_KEY || process.env.BREVO_PASS;
+    if (!brevoApiKey) throw new Error('BREVO_API_KEY missing');
+    
+    await axios.post('https://api.brevo.com/v3/smtp/email', {
+      sender: { email: from, name: 'GolViral' },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html
+    }, {
+      headers: { 'api-key': brevoApiKey, 'Content-Type': 'application/json' }
     });
-    await brevo.sendMail(mailOptions);
-    console.log(`[Email Dispatched] Primary sent cleanly to ${to}`);
+    
+    console.log(`[Email Dispatched] Primary Brevo API sent to ${to}`);
   } catch (err) {
-    console.error(`[Email Warning] Primary failed, executing Resend Matrix...`);
+    console.error(`[Email Warning] Primary failed, executing Resend Matrix...`, err.response?.data || err.message);
     if (!process.env.RESENDAPIKEY) {
       return console.error('[Email Catastrophe] Resend credentials not defined.');
     }
-    await axios.post('https://api.resend.com/emails', {
-      from: process.env.BREVO_USER || 'noreply@golviral.com', to: [to], subject, html
-    }, { 
-      headers: { 'Authorization': `Bearer ${process.env.RESENDAPIKEY}`, 'Content-Type': 'application/json' } 
-    })
-    .then(() => console.log(`[Email Dispatched] Fallback recovered for ${to}`))
-    .catch((fallbackErr) => console.error(`[Email Failure] Total collapse:`, fallbackErr.message));
+    try {
+      await axios.post('https://api.resend.com/emails', {
+        from: from, to: [to], subject, html
+      }, { 
+        headers: { 'Authorization': `Bearer ${process.env.RESENDAPIKEY}`, 'Content-Type': 'application/json' } 
+      });
+      console.log(`[Email Dispatched] Fallback Resend recovered for ${to}`);
+    } catch (fallbackErr) {
+      console.error(`[Email Failure] Total collapse:`, fallbackErr.response?.data || fallbackErr.message);
+    }
   }
 }
 
