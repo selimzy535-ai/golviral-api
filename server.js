@@ -1778,44 +1778,44 @@ app.get('/api/messages', authenticateToken, async (req,res)=>{
   }
   res.json({chats});
 });
+
 app.post('/api/gift/send', authenticateToken, async (req,res)=>{
-  try {
-    const {receiverId} = req.body;
-    const senderId = req.user.userId;
+  const {receiverId} = req.body;
+  const senderId = req.user.userId;
+  const db = getDbShard(senderId);
 
-    if(!receiverId) return res.status(400).json({error:"receiverId required"});
-    if(senderId === receiverId) return res.status(400).json({error:"Cannot gift yourself"});
+  const gift = await db.client.gift.findFirst({where:{buyerId:senderId, expiresAt:{gt:new Date()}, giftsSent:{lt:100}}});
+  if(!gift) return res.status(400).json({error:"No active gift pack"});
 
-    const db = getDbShard(senderId);
-    const gift = await db.client.gift.findFirst({
-      where:{buyerId:senderId, expiresAt:{gt:new Date()}, giftsSent:{lt: db.client.gift.fields ? undefined : 100}, giftsSent:{lt:100}}
-    });
-    if(!gift) return res.status(400).json({error:"No active gift pack"});
-
-    // STEP 1 - decrement your pack
-    await db.client.gift.update({
-      where:{id:gift.id}, 
-      data:{giftsSent:{increment:1}}
-    });
-
-    // STEP 2 - credit receiver (separate, not inside $transaction)
-    await processWalletTransaction({
-      userId:receiverId, 
-      action:'GIFT', 
-      isCreator:true, 
-      meta:{points:gift.pointsPerGift, refId:gift.id}
-    });
-
-    // STEP 3 - notify
-    sendNotification(receiverId, 'GIFT', 'Gift Received! 🎁', `You received ${gift.giftType} gift! +${gift.pointsPerGift} pts`).catch(()=>{});
-
-    res.json({success:true, pointsSent:gift.pointsPerGift});
-
-  } catch(e) {
-    console.error('[Gift Send Error]', e.message);
-    res.status(500).json({error:"Gift failed: " + e.message});
-  }
+  await db.client.$transaction([
+    db.client.gift.update({where:{id:gift.id}, data:{giftsSent:{increment:1}}}),
+    processWalletTransaction({userId:receiverId, action:'GIFT', isCreator:true, meta:{points:gift.pointsPerGift, refId:gift.id}})
+  ])
+  sendNotification(receiverId, 'GIFT', 'Gift Received! 🎁', `You received ${gift.giftType} gift! +${gift.pointsPerGift} pts`);
+  res.json({success:true, pointsSent:gift.pointsPerGift})
 })
+
+// ========== HELPER: SEND NOTIFICATION ==========
+async function sendNotification(userId, type, title, body, data = {}) {
+  const db = getDbShard(userId);
+  await db.client.notification.create({ data: { userId, type, title, body, data } }).catch(()=>{});
+
+  const subs = await db.client.pushSubscription.findMany({ where: { userId } }).catch(()=>[]);
+  if(subs.length === 0) return;
+
+  for(const sub of subs){
+    const pushSubscription = { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } };
+    webpush.sendNotification(pushSubscription, JSON.stringify({title, body, data}))
+  .then(() => console.log(`[Push OK] VAPID key is VALID. Sent to ${userId}`))
+  .catch(async (err) => {
+      console.error(`[Push FAIL] VAPID key is FAKE/WRONG`);
+      console.error(`Status: ${err.statusCode} | Body: ${err.body}`); // 400 = bad key
+      if(err.statusCode === 410 || err.statusCode === 404){
+        await db.client.pushSubscription.delete({ where: { id: sub.id } }).catch(()=>{});
+      }
+    });
+  }
+}
 
 // ========== ENDPOINT 1: PROFILE POSTS ==========
 app.get('/api/user/:id/posts', authenticateToken, async (req, res) => { 
