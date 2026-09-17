@@ -1780,19 +1780,42 @@ app.get('/api/messages', authenticateToken, async (req,res)=>{
 });
 
 app.post('/api/gift/send', authenticateToken, async (req,res)=>{
-  const {receiverId} = req.body;
-  const senderId = req.user.userId;
-  const db = getDbShard(senderId);
+  try {
+    const {receiverId} = req.body;
+    const senderId = req.user.userId;
 
-  const gift = await db.client.gift.findFirst({where:{buyerId:senderId, expiresAt:{gt:new Date()}, giftsSent:{lt:100}}});
-  if(!gift) return res.status(400).json({error:"No active gift pack"});
+    if(!receiverId) return res.status(400).json({error:"receiverId required"});
+    if(senderId === receiverId) return res.status(400).json({error:"Cannot gift yourself"});
 
-  await db.client.$transaction([
-    db.client.gift.update({where:{id:gift.id}, data:{giftsSent:{increment:1}}}),
-    processWalletTransaction({userId:receiverId, action:'GIFT', isCreator:true, meta:{points:gift.pointsPerGift, refId:gift.id}})
-  ])
-  sendNotification(receiverId, 'GIFT', 'Gift Received! 🎁', `You received ${gift.giftType} gift! +${gift.pointsPerGift} pts`);
-  res.json({success:true, pointsSent:gift.pointsPerGift})
+    const db = getDbShard(senderId);
+    const gift = await db.client.gift.findFirst({
+      where:{buyerId:senderId, expiresAt:{gt:new Date()}, giftsSent:{lt: db.client.gift.fields ? undefined : 100}, giftsSent:{lt:100}}
+    });
+    if(!gift) return res.status(400).json({error:"No active gift pack"});
+
+    // STEP 1 - decrement your pack
+    await db.client.gift.update({
+      where:{id:gift.id}, 
+      data:{giftsSent:{increment:1}}
+    });
+
+    // STEP 2 - credit receiver (separate, not inside $transaction)
+    await processWalletTransaction({
+      userId:receiverId, 
+      action:'GIFT', 
+      isCreator:true, 
+      meta:{points:gift.pointsPerGift, refId:gift.id}
+    });
+
+    // STEP 3 - notify
+    sendNotification(receiverId, 'GIFT', 'Gift Received! 🎁', `You received ${gift.giftType} gift! +${gift.pointsPerGift} pts`).catch(()=>{});
+
+    res.json({success:true, pointsSent:gift.pointsPerGift});
+
+  } catch(e) {
+    console.error('[Gift Send Error]', e.message);
+    res.status(500).json({error:"Gift failed: " + e.message});
+  }
 })
 
 // ========== HELPER: SEND NOTIFICATION ==========
