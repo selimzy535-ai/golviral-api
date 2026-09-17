@@ -1983,13 +1983,7 @@ app.post('/api/notifications/read/:id', authenticateToken, async (req, res) => {
     res.status(500).json({error: e.message});
   }
 });
-// 3. EXPORT FOR profile.js + ADMIN.JS TO USE
-module.exports = {
-  prismaClients,
-  findPostAcrossShards,
-  sendNotification,
-  getDbShard
-};
+
 // ========== CHORE SYSTEM SCHEDULER CRON SERVICES ==========
 
 // 1. Interaction Buffer Batch Processor (Every 30 Seconds)
@@ -2213,6 +2207,13 @@ cron.schedule('0 * * * *', async () => {
   if (deletedTotal > 0) console.log(`[DM CRON] Deleted ${deletedTotal} messages >72h`);
 });
 
+// 3. EXPORT FOR profile.js + ADMIN.JS TO USE
+module.exports = {
+  prismaClients,
+  findPostAcrossShards,
+  sendNotification,
+  getDbShard
+};
 
 // ========== HEALTH CHECK UP ==========
 app.get('/', (req, res) => {
