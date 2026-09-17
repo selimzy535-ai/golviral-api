@@ -2091,7 +2091,7 @@ cron.schedule('*/30 * * * * *', async () => {
   }
 });
 
-// 2. Nightly Monetization Evaluation (00:00 Daily)
+// 2. Nightly Monetization Evaluation (00:00 Daily) - FIXED WITH FACE CHECK
 cron.schedule('0 0 * * *', async () => {
   const targets = [prismaClients.db1, prismaClients.db2, prismaClients.db3];
   for (const db of targets) {
@@ -2101,12 +2101,18 @@ cron.schedule('0 0 * * *', async () => {
         const days = Math.floor((Date.now() - new Date(user.createdAt)) / 86400000);
         const followers = await getTotalFollowers(user.id);
 
-        if (days >= 7 && followers >= 10) {
+        // NEW: Check face verification too
+        let faceVerified = false;
+        try {
+          const {rows} = await profilePool.query(`SELECT face_verified FROM profiles WHERE user_id=$1`, [user.id]);
+          faceVerified =!!rows[0]?.face_verified;
+        } catch(e){}
+
+        if (days >= 7 && followers >= 10 && faceVerified) {
           await db.user.update({ where: { id: user.id }, data: { monetizeFlag: true, freeFarmingStopped: true } });
-          
-          // Added missing await
-          await sendNotification(user.id, 'MONETIZE', "Congrats! You're Earning 💰", 'You hit 7 days + 10 followers. Earnings now go to Cash.');
-          await sendEmail(user.email, 'Monetization Activated!', 'You hit 7 days + 10 followers. Earnings now go to Cash.');
+
+          await sendNotification(user.id, 'MONETIZE', "Congrats! You're Earning 💰", 'You hit 7 days + 10 followers + face verified. Earnings now go to Cash.').catch(()=>{});
+          await sendEmail(user.email, 'Monetization Activated!', 'You hit 7 days + 10 followers + face verified. Earnings now go to Cash.').catch(()=>{});
         }
       }
     } catch (err) {
