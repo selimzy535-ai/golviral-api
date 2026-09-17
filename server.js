@@ -734,83 +734,103 @@ app.post('/api/post/cdn-finalize', async (req, res) => {
   }
 });
 
-// ========== FIXED VIEW - with 5 min dedup per viewerIp/viewerId ==========
+// ========== FIXED VIEW - CRON ONLY COUNTS ==========
 app.post('/api/view', async (req, res) => {
   try {
     const { postId, userId, viewerId, viewerIp } = req.body;
-    if (!postId ||!userId) return res.status(202).json({ buffered: true });
+    if (!postId || !userId) return res.status(202).json({ buffered: true });
 
-    // dedup key: 1 view per IP/user per post per 5 minutes
-    const dedupId = viewerId || viewerIp || 'anon';
+    // Quick dedup in Redis (5 min per viewer) so we don't flood buffer
+    const dedupId = viewerId || viewerIp || req.ip || 'anon';
     const redis = redisClients.redis1;
     const dedupKey = `view:${postId}:${dedupId}`;
+    
     const already = await redis.get(dedupKey).catch(()=>null);
     if (already) return res.status(202).json({ buffered: true, dedup: true });
 
-    await redis.set(dedupKey, '1', 'EX', 300).catch(()=>{}); // 5 min
+    // Set 5 min dedup
+    await redis.set(dedupKey, '1', 'EX', 300).catch(()=>{});
 
-    interactionBuffer.push({ type: 'VIEW', postId, userId, viewerId, viewerIp, timestamp: Date.now() });
+    // Buffer only - cron will do PFADD + views + earnings + milestones
+    interactionBuffer.push({ 
+      type: 'VIEW', 
+      postId, 
+      userId, 
+      viewerId, 
+      viewerIp: viewerIp || req.ip,
+      timestamp: Date.now() 
+    });
+
     res.status(202).json({ buffered: true });
-  } catch { res.status(202).json({ buffered: true }); }
+  } catch (err) {
+    // Never fail view - always 202
+    res.status(202).json({ buffered: true });
+  }
 });
 
-// ========== FIXED LIKE - no overcount ==========
+// ========== FIXED LIKE - CRON ONLY COUNTS ==========
 app.post('/api/like', authenticateToken, async (req, res) => {
   try {
     const { postId, creatorId } = req.body;
     const actorId = req.user.userId;
+    if(!postId || !creatorId) return res.status(400).json({error:"Missing postId or creatorId"});
+
     const likeId = crypto.randomBytes(8).toString('hex');
 
+    // Try insert - if already liked, do nothing (prevents spam)
     const result = await db5.query(`
       INSERT INTO likes(id, "postId", "userId", "creatorId")
       VALUES($1,$2,$3,$4) ON CONFLICT ("postId","userId") DO NOTHING RETURNING id
     `, [likeId, postId, actorId, creatorId]);
 
     if (result.rowCount > 0) {
-      await db5.query(`UPDATE posts SET likes = likes + 1 WHERE id = $1`, [postId]);
+      // Only buffer - cron will increment likes + give earnings
       interactionBuffer.push({ type: 'LIKE', postId, userId: creatorId, actorId, timestamp: Date.now() });
+      return res.status(202).json({ liked: true });
+    } else {
+      return res.status(200).json({ liked: false, message: "Already liked" });
     }
-
-    res.status(202).json({ liked: result.rowCount > 0 });
   } catch (err) {
     console.error('[Like Error]', err.message);
     res.status(500).json({ error: 'Like failed' });
   }
 });
 
-// ========== FIXED COMMENT - increments comments count ==========
+// ========== FIXED COMMENT - CRON ONLY COUNTS ==========
 app.post('/api/comment', authenticateToken, async (req, res) => {
   try {
     const { postId, creatorId, text } = req.body;
     const actorId = req.user.userId;
-    if (!postId ||!creatorId ||!text || text.trim().length < 2) {
+    if (!postId || !creatorId || !text || text.trim().length < 2) {
       return res.status(400).json({ error: 'Invalid comment payload' });
     }
 
     const redis = getRedisShard(actorId);
     const cooldown = await redis.get(`cool:comment:${actorId}`).catch(() => null);
-    if (cooldown) return res.status(429).json({ error: 'Comment cooldown active' });
+    if (cooldown) return res.status(429).json({ error: 'Comment cooldown active - wait 15s' });
     await redis.set(`cool:comment:${actorId}`, '1', 'EX', 15).catch(() => {});
 
     const commentId = crypto.randomBytes(8).toString('hex');
+    
+    // 1. Insert comment immediately so user sees it
     await db5.query(
       `INSERT INTO comments(id, "postId", "userId", text) VALUES($1,$2,$3,$4)`,
       [commentId, postId, actorId, text.trim().slice(0, 500)]
     );
-    await db5.query(`UPDATE posts SET comments = comments + 1 WHERE id = $1`, [postId]);
+
+    // 2. Only buffer - cron will increment comment count + give earnings
+    interactionBuffer.push({ type: 'COMMENT', postId, userId: creatorId, actorId, timestamp: Date.now() });
 
     const actorDb = getDbShard(actorId);
-    const actorUser = await actorDb.client.user.findUnique({where:{id:actorId}});
-    if (actorUser) sendNotification(creatorId, 'COMMENT', 'New Comment', `${actorUser.username} commented: ${text.slice(0,40)}`);
+    const actorUser = await actorDb.client.user.findUnique({where:{id:actorId}}).catch(()=>null);
+    if (actorUser) sendNotification(creatorId, 'COMMENT', 'New Comment', `${actorUser.username} commented: ${text.slice(0,40)}`).catch(()=>{});
 
-    interactionBuffer.push({ type: 'COMMENT', postId, userId: creatorId, actorId, timestamp: Date.now() });
     res.status(201).json({ success: true, commentId });
   } catch (err) {
     console.error('[Comment Error]', err.message);
     res.status(500).json({ error: 'Comment failed' });
   }
 });
-
 app.get('/api/comments/:postId', async (req, res) => {
   try {
     const { postId } = req.params;
