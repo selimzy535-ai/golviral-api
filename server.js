@@ -1199,46 +1199,25 @@ const bucketMap = {
  2: { client: b2Clients.b2c, bucket: b2Config.c.bucket }
 };
 
-// NEW authenticate that allows?token= for video tags
-function authenticateTokenOrQuery(req,res,next){
-  try{
-    let token = null;
-    const authHeader = req.headers['authorization'];
-    if(authHeader) token = authHeader.split(' ')[1];
-    if(!token && req.query.token) token = req.query.token; // <-- for <video>
-    if(!token) return res.status(401).end();
-    jwt.verify(token, JWT_SECRET, (err,user)=>{
-      if(err) return res.status(403).end();
-      req.user = user;
-      next();
-    });
-  }catch{ return res.status(401).end(); }
-}
-
-app.get('/api/media/sign', authenticateTokenOrQuery, async (req,res)=>{
+app.get('/api/media/sign', authenticateToken, async (req,res)=>{
   try{
     const {postId} = req.query;
-    if(!postId) return res.status(400).end();
+    if(!postId) return res.status(400).json({error:'postId required'});
 
-    const { rows } = await db5.query(`SELECT file_id, "botId" FROM posts WHERE id=$1`, [postId]);
+    const { rows } = await db5.query(`SELECT file_id, "botId", type FROM posts WHERE id=$1`, [postId]);
     const post = rows[0];
-    if(!post?.file_id) return res.status(404).end();
+    if(!post?.file_id || post?.botId === null){
+      return res.status(404).json({error:'Media not ready'});
+    }
 
-    const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh`, {
-      params: { file_id: post.file_id, botId: post.botId },
-      headers: { 'x-api-key': process.env.CDN_API_KEY },
-      timeout: 5000
+    // Call CDN to get fresh TG URL
+    const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh?file_id=${post.file_id}&botId=${post.botId}`, {
+      headers: { 'x-api-key': process.env.CDN_API_KEY }
     });
-
-    const realUrl = cdnRes.data.url;
-    if(!realUrl) return res.status(404).end();
-
-    res.set('Cache-Control', 'public, max-age=3600');
-    res.set('Access-Control-Allow-Origin', '*'); // important for video tag
-    return res.redirect(302, realUrl);
+    res.json({ url: cdnRes.data.url });
   }catch(e){
     console.error('[Sign Error]', e.message);
-    return res.status(500).end();
+    res.status(500).json({error:'sign failed'});
   }
 });
 app.get('/api/wallet', authenticateToken, async (req, res) => {
