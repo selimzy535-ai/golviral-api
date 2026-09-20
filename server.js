@@ -1202,22 +1202,29 @@ const bucketMap = {
 app.get('/api/media/sign', authenticateToken, async (req,res)=>{
   try{
     const {postId} = req.query;
-    if(!postId) return res.status(400).json({error:'postId required'});
+    if(!postId) return res.status(400).end();
 
-    const { rows } = await db5.query(`SELECT file_id, "botId", type FROM posts WHERE id=$1`, [postId]);
+    const { rows } = await db5.query(`SELECT file_id, "botId" FROM posts WHERE id=$1`, [postId]);
     const post = rows[0];
-    if(!post?.file_id || post?.botId === null){
-      return res.status(404).json({error:'Media not ready'});
-    }
+    if(!post?.file_id) return res.status(404).end();
 
-    // Call CDN to get fresh TG URL
-    const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh?file_id=${post.file_id}&botId=${post.botId}`, {
-      headers: { 'x-api-key': process.env.CDN_API_KEY }
+    // Get fresh TG URL from your CDN worker (fast)
+    const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh`, {
+      params: { file_id: post.file_id, botId: post.botId },
+      headers: { 'x-api-key': process.env.CDN_API_KEY },
+      timeout: 5000
     });
-    res.json({ url: cdnRes.data.url });
+
+    const realUrl = cdnRes.data.url;
+    if(!realUrl) return res.status(404).end();
+
+    // KEY: Redirect, not JSON. 0 bandwidth on Render
+    // Cache 1 hour on Cloudflare/browser
+    res.set('Cache-Control', 'public, max-age=3600');
+    return res.redirect(302, realUrl);
   }catch(e){
     console.error('[Sign Error]', e.message);
-    res.status(500).json({error:'sign failed'});
+    return res.status(500).end();
   }
 });
 
