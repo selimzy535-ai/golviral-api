@@ -1199,7 +1199,23 @@ const bucketMap = {
  2: { client: b2Clients.b2c, bucket: b2Config.c.bucket }
 };
 
-app.get('/api/media/sign', authenticateToken, async (req,res)=>{
+// NEW authenticate that allows?token= for video tags
+function authenticateTokenOrQuery(req,res,next){
+  try{
+    let token = null;
+    const authHeader = req.headers['authorization'];
+    if(authHeader) token = authHeader.split(' ')[1];
+    if(!token && req.query.token) token = req.query.token; // <-- for <video>
+    if(!token) return res.status(401).end();
+    jwt.verify(token, JWT_SECRET, (err,user)=>{
+      if(err) return res.status(403).end();
+      req.user = user;
+      next();
+    });
+  }catch{ return res.status(401).end(); }
+}
+
+app.get('/api/media/sign', authenticateTokenOrQuery, async (req,res)=>{
   try{
     const {postId} = req.query;
     if(!postId) return res.status(400).end();
@@ -1208,7 +1224,6 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
     const post = rows[0];
     if(!post?.file_id) return res.status(404).end();
 
-    // Get fresh TG URL from your CDN worker (fast)
     const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh`, {
       params: { file_id: post.file_id, botId: post.botId },
       headers: { 'x-api-key': process.env.CDN_API_KEY },
@@ -1218,16 +1233,14 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
     const realUrl = cdnRes.data.url;
     if(!realUrl) return res.status(404).end();
 
-    // KEY: Redirect, not JSON. 0 bandwidth on Render
-    // Cache 1 hour on Cloudflare/browser
     res.set('Cache-Control', 'public, max-age=3600');
+    res.set('Access-Control-Allow-Origin', '*'); // important for video tag
     return res.redirect(302, realUrl);
   }catch(e){
     console.error('[Sign Error]', e.message);
     return res.status(500).end();
   }
 });
-
 app.get('/api/wallet', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
