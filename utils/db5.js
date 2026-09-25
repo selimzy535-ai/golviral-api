@@ -1,7 +1,7 @@
 const { Pool } = require('pg');
 
 const db5 = new Pool({
-  connectionString: process.env.DATABASE_URL_DB5,
+  connectionString: process.env.AIVEN_DB5,
   max: 10, // 10 connections is enough for social
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
