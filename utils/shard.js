@@ -1,4 +1,3 @@
-
 // utils/shard.js
 const { PrismaClient } = require('@prisma/client');
 const Redis = require('ioredis');
@@ -19,8 +18,8 @@ const prismaClients = {
 
 Object.entries(prismaClients).forEach(([name, client]) => {
   client.$connect()
-   .then(() => console.log(`[Prisma Success] Connected cleanly to ${name}`))
-   .catch((err) => console.error(`[Prisma Warning] Shard ${name} offline on start.`, err.message));
+  .then(() => console.log(`[Prisma Success] Connected cleanly to ${name}`))
+  .catch((err) => console.error(`[Prisma Warning] Shard ${name} offline on start.`, err.message));
 });
 
 // ========== 3x REDIS SHARDS ==========
@@ -28,7 +27,7 @@ const redisUrls = [
   process.env.REDISURL1,
   process.env.REDISURL2,
   process.env.REDISURL3
-].map(u => (u && u.trim()) ? u.trim() : 'redis://127.0.0.1:6379');
+].map(u => (u && u.trim())? u.trim() : 'redis://127.0.0.1:6379');
 
 const redisClients = {
   redis1: new Redis(redisUrls[0], { maxRetriesPerRequest: 1, retryStrategy: (times) => Math.min(times * 50, 2000) }),
@@ -53,7 +52,6 @@ const crypto = require('crypto');
 
 function getShardIndex(id) {
   if (!id) return 0;
-  // MD5 hash the id, take first 8 chars, convert to int, then %3
   const hash = crypto.createHash('md5').update(id).digest('hex');
   return parseInt(hash.substring(0, 8), 16) % 3;
 }
@@ -87,25 +85,26 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
     const user = await db.client.user.findUnique({ where: { id: userId } }).catch(() => null);
     if (!user) return;
 
-    const walletType = user.monetizeFlag ? 'CASH' : 'FREE';
+    const walletType = user.monetizeFlag? 'CASH' : 'FREE';
     let pointsToAdd = 0;
 
     switch (action) {
-      case 'LIKE': pointsToAdd = isCreator ? 2 : 0; break;
-      case 'COMMENT': pointsToAdd = isCreator ? 10 : 1; break;
-      case 'VIEW_REEL': pointsToAdd = isCreator ? 1 : 0; break; 
+      case 'LIKE': pointsToAdd = isCreator? 2 : 0; break;
+      case 'COMMENT': pointsToAdd = isCreator? 10 : 1; break;
+      case 'VIEW_REEL': pointsToAdd = isCreator? 1 : 0; break;
       case 'READ_NOVEL': pointsToAdd = 10; break;
       case 'READ_STORY': pointsToAdd = 10; break;
       case 'REFERRAL_BONUS': pointsToAdd = 100; break;
-      case 'GIFT': pointsToAdd = meta.points || 0; break; 
+      case 'GIFT': pointsToAdd = meta.points || 0; break;
     }
     if (pointsToAdd === 0) return;
 
+    // DAILY CAP CHECK (on POINTS)
     if (walletType === 'CASH') {
       const today = new Date().toISOString().split('T')[0];
       const capKey = `cap:${userId}:${today}`;
       const current = parseFloat(await redis.get(capKey).catch(() => '0') || '0');
-      if (current >= 10000) return;
+      if (current >= 10000) return; // 10k points = ₦1k max per day
       if (current + pointsToAdd > 10000) pointsToAdd = 10000 - current;
       await redis.incrbyfloat(capKey, pointsToAdd).catch(() => {});
       await redis.expire(capKey, 90000).catch(() => {});
@@ -119,15 +118,26 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
       await redis.expire(limitKey, 86400).catch(() => {});
     }
 
+    // ===== 10:1 CONVERSION =====
+    // 50,000 points = 50,000 freeCredits OR 5,000 cash (₦5k)
+    const cashToAdd = pointsToAdd / 10;
+    const ledgerAmount = walletType === 'CASH'? cashToAdd : pointsToAdd;
+
     await db.client.$transaction([
       db.client.pointsLedger.create({
-        data: { userId, amount: pointsToAdd, type: walletType, action, referenceId: meta.refId || '' }
+        data: {
+          userId,
+          amount: ledgerAmount,
+          type: walletType,
+          action,
+          referenceId: meta.refId || ''
+        }
       }),
       db.client.user.update({
         where: { id: userId },
         data: {
-          freeCredits: walletType === 'FREE' ? { increment: pointsToAdd } : undefined,
-          cashBalance: walletType === 'CASH' ? { increment: pointsToAdd } : undefined,
+          freeCredits: walletType === 'FREE'? { increment: pointsToAdd } : undefined,
+          cashBalance: walletType === 'CASH'? { increment: cashToAdd } : undefined,
         }
       })
     ]);
@@ -140,12 +150,11 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
   }
 }
 
-module.exports = { 
-  prismaClients, 
-  redisClients, 
-  getDbShard, 
-  getRedisShard, 
-  profilePool, 
-  processWalletTransaction // <-- EXPORT IT HERE
+module.exports = {
+  prismaClients,
+  redisClients,
+  getDbShard,
+  getRedisShard,
+  profilePool,
+  processWalletTransaction
 };
-
