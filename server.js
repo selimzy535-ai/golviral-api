@@ -447,11 +447,11 @@ app.post('/api/auth/signup', async (req, res) => {
         username: usernameNorm,
         email: emailNorm,
         password: hashed,
-        role: "user", // from your schema default
-        freeCredits: 1500,
+        role: "user",
+        freeCredits: 15000, // CHANGED: 15k on signup
         cashBalance: 0,
-        monetizeFlag: false,           // ADDED BACK
-        freeFarmingStopped: false,     // ADDED BACK
+        monetizeFlag: false,
+        freeFarmingStopped: false,
         isVerified: false,
         dmUnlocked: false
       }
@@ -480,11 +480,14 @@ app.post('/api/auth/signup', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password, passToken } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Missing fields' });
+
     if (!(await internalVerifyPassToken(passToken))) {
       return res.status(400).json({ error: 'Math verification required' });
     }
 
-    const context = await findUserAcrossShards('email', email);
+    const emailNorm = email.toLowerCase().trim(); // FIXED: case-insensitive login
+    const context = await findUserAcrossShards('email', emailNorm);
     if (!context) return res.status(401).json({ error: 'Invalid security matching parameters' });
 
     const match = await bcrypt.compare(password, context.user.password);
@@ -493,6 +496,7 @@ app.post('/api/auth/login', async (req, res) => {
     const token = jwt.sign({ userId: context.user.id, username: context.user.username }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ token, userId: context.user.id, profileLink: `${APP_BASE_URL}/u/${context.user.id}` });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Login engine exception pipeline executed' });
   }
 });
@@ -504,16 +508,17 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       return res.status(400).json({ error: 'Math verification check failed' });
     }
 
-    const context = await findUserAcrossShards('email', email);
+    const emailNorm = email.toLowerCase().trim(); // FIXED
+    const context = await findUserAcrossShards('email', emailNorm);
     if (!context) return res.json({ message: 'If account maps inside database, recovery parameters have been targeted' });
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const redis = getRedisShard(context.user.id);
-    await redis.set(`otp:${email}`, otp, 'EX', 900).catch(() => {
-      global[`otp_${email}`] = { otp, exp: Date.now() + 900000 };
+    await redis.set(`otp:${emailNorm}`, otp, 'EX', 900).catch(() => {
+      global[`otp_${emailNorm}`] = { otp, exp: Date.now() + 900000 };
     });
 
-    await sendEmail(email, 'Password Security Reset Access Payload', `<p>Your validation token: <b>${otp}</b>. Valid 15 minutes.</p>`);
+    await sendEmail(emailNorm, 'Password Security Reset Access Payload', `<p>Your validation token: <b>${otp}</b>. Valid 15 minutes.</p>`);
     res.json({ message: 'If account maps inside database, recovery parameters have been targeted' });
   } catch (err) {
     res.json({ message: 'Dynamic fallback completed context execution gracefully' });
@@ -523,23 +528,24 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 app.post('/api/auth/reset-password', async (req, res) => {
   try {
     const { email, otp, newPassword } = req.body;
-    const context = await findUserAcrossShards('email', email);
+    const emailNorm = email.toLowerCase().trim(); // FIXED
+    const context = await findUserAcrossShards('email', emailNorm);
     if (!context) return res.status(400).json({ error: 'Context matching failed completely' });
 
     const redis = getRedisShard(context.user.id);
-    let savedOtp = await redis.get(`otp:${email}`).catch(() => null);
+    let savedOtp = await redis.get(`otp:${emailNorm}`).catch(() => null);
     
-    if (!savedOtp && global[`otp_${email}`] && global[`otp_${email}`].exp > Date.now()) {
-      savedOtp = global[`otp_${email}`].otp;
+    if (!savedOtp && global[`otp_${emailNorm}`] && global[`otp_${emailNorm}`].exp > Date.now()) {
+      savedOtp = global[`otp_${emailNorm}`].otp;
     }
 
     if (!savedOtp || savedOtp !== String(otp).trim()) return res.status(400).json({ error: 'Expired or mismatched security token' });
 
     const hash = await bcrypt.hash(newPassword, 12);
-    await context.db.user.update({ where: { email }, data: { password: hash } });
+    await context.db.user.update({ where: { email: emailNorm }, data: { password: hash } });
     
-    await redis.del(`otp:${email}`).catch(() => {});
-    delete global[`otp_${email}`];
+    await redis.del(`otp:${emailNorm}`).catch(() => {});
+    delete global[`otp_${emailNorm}`];
 
     res.json({ message: 'Password cluster reconfiguration finalized' });
   } catch (err) {
