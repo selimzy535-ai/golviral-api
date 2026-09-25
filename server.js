@@ -2243,43 +2243,7 @@ module.exports = {
   getDbShard
 };
 
-app.get('/api/admin/migrate-db5', async (req,res)=>{
-  if(req.query.key!== 'golviral123') return res.status(403).json({error:'wrong key'});
 
-  const { Pool } = require('pg');
-  const oldDb = new Pool({ connectionString: process.env.OLD_DB5_URL, ssl:{rejectUnauthorized:false} });
-  const newDb = new Pool({ connectionString: process.env.AIVEN_DB5, ssl:{require:true} });
-
-  try {
-    const tables = ['posts','likes','comments','follows'];
-    let result = {};
-
-    for(const table of tables){
-      const { rows } = await oldDb.query(`SELECT * FROM ${table}`);
-      console.log(`[MIGRATE] ${table}: ${rows.length} rows`);
-
-      if(rows.length === 0){ result[table]=0; continue; }
-
-      for(const row of rows){
-        const cols = Object.keys(row);
-        const vals = Object.values(row);
-        const placeholders = cols.map((_,i)=>`$${i+1}`).join(',');
-        const colNames = cols.map(c=>`"${c}"`).join(',');
-
-        await newDb.query(
-          `INSERT INTO ${table} (${colNames}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`,
-          vals
-        ).catch(e=> console.log(`Skip ${table}:`, e.message));
-      }
-      result[table]=rows.length;
-    }
-
-    res.json({ success:true, migrated: result });
-  } catch(e){
-    console.error(e);
-    res.status(500).json({error:e.message});
-  }
-});
 
 // ========== HEALTH CHECK UP ==========
 app.get('/', (req, res) => {
