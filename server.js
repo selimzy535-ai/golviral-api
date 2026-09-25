@@ -2243,56 +2243,42 @@ module.exports = {
   getDbShard
 };
 
-// ========== SEO SITEMAP - 4 ROUTES ONLY ==========
+app.get('/api/admin/migrate-db5', async (req,res)=>{
+  if(req.query.key!== 'golviral123') return res.status(403).json({error:'wrong key'});
 
-// 1. Main index
-app.get('/sitemap-index.xml', async (req, res) => {
+  const { Pool } = require('pg');
+  const oldDb = new Pool({ connectionString: process.env.OLD_DB5_URL, ssl:{rejectUnauthorized:false} });
+  const newDb = new Pool({ connectionString: process.env.AIVEN_DB5, ssl:{require:true} });
+
   try {
-    const perPage = 1000;
-    const counts = await Promise.all([
-      prismaClients.db1.user.count().catch(()=>0),
-      prismaClients.db2.user.count().catch(()=>0),
-      prismaClients.db3.user.count().catch(()=>0),
-    ]);
-    const total = counts.reduce((a,b)=>a+b, 0);
-    const pages = Math.ceil(total / perPage) || 1;
-    let xml = `<?xml version="1.0" encoding="UTF-8"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">`;
-    for(let i=1; i<=pages; i++){
-      xml += `<sitemap><loc>https://golviral-api.onrender.com/sitemap/profiles-${i}.xml</loc><lastmod>${new Date().toISOString()}</lastmod></sitemap>`;
+    const tables = ['posts','likes','comments','follows'];
+    let result = {};
+
+    for(const table of tables){
+      const { rows } = await oldDb.query(`SELECT * FROM ${table}`);
+      console.log(`[MIGRATE] ${table}: ${rows.length} rows`);
+
+      if(rows.length === 0){ result[table]=0; continue; }
+
+      for(const row of rows){
+        const cols = Object.keys(row);
+        const vals = Object.values(row);
+        const placeholders = cols.map((_,i)=>`$${i+1}`).join(',');
+        const colNames = cols.map(c=>`"${c}"`).join(',');
+
+        await newDb.query(
+          `INSERT INTO ${table} (${colNames}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`,
+          vals
+        ).catch(e=> console.log(`Skip ${table}:`, e.message));
+      }
+      result[table]=rows.length;
     }
-    xml += `</sitemapindex>`;
-    res.header('Content-Type','application/xml').send(xml);
-  } catch(e){ res.status(500).header('Content-Type','application/xml').send('<error/>'); }
-});
 
-// 2. Profiles pages
-app.get('/sitemap/profiles-:page.xml', async (req, res) => {
-  try {
-    const page = parseInt(req.params.page) || 1;
-    const perPage = 1000;
-    const skip = (page-1)*perPage;
-    const takePerShard = 400;
-    const [u1,u2,u3] = await Promise.all([
-      prismaClients.db1.user.findMany({ select:{id:true, updatedAt:true}, orderBy:{createdAt:'desc'}, skip, take: takePerShard }).catch(()=>[]),
-      prismaClients.db2.user.findMany({ select:{id:true, updatedAt:true}, orderBy:{createdAt:'desc'}, skip, take: takePerShard }).catch(()=>[]),
-      prismaClients.db3.user.findMany({ select:{id:true, updatedAt:true}, orderBy:{createdAt:'desc'}, skip, take: takePerShard }).catch(()=>[]),
-    ]);
-    let allUsers = [...u1,...u2,...u3].slice(0, perPage);
-    let xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">`;
-    allUsers.forEach(u=>{
-      xml += `<url><loc>https://golviral.com/u/${u.id}</loc><lastmod>${(u.updatedAt||new Date()).toISOString()}</lastmod><changefreq>weekly</changefreq><priority>0.8</priority></url>`;
-    });
-    xml += `</urlset>`;
-    res.header('Content-Type','application/xml').send(xml);
-  } catch(e){ res.status(500).header('Content-Type','application/xml').send('<error/>'); }
-});
-
-// 3. Alias
-app.get('/sitemap.xml', (req,res)=> res.redirect(301, '/sitemap-index.xml'));
-
-// 4. Robots for API (also add one on frontend)
-app.get('/robots.txt', (req,res)=>{
-  res.type('text/plain').send(`User-agent: *\nAllow: /\nSitemap: https://golviral-api.onrender.com/sitemap-index.xml`);
+    res.json({ success:true, migrated: result });
+  } catch(e){
+    console.error(e);
+    res.status(500).json({error:e.message});
+  }
 });
 
 // ========== HEALTH CHECK UP ==========
