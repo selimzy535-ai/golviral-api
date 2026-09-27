@@ -1206,6 +1206,11 @@ const bucketMap = {
 };
 
 app.get('/api/media/sign', authenticateToken, async (req,res)=>{
+  // FIX 304 BUG
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   try{
     const {postId} = req.query;
     if(!postId) return res.status(400).json({error:'postId required'});
@@ -1217,9 +1222,8 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
     }
 
     const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
-
-    // Everyone via worker - Range + ffmpeg fix for all devices
-    const workerUrl = `${WORKER_URL}/?file_id=${post.file_id}&botId=${post.botId}`;
+    // encode file_id - some have + / =
+    const workerUrl = `${WORKER_URL}/?file_id=${encodeURIComponent(post.file_id)}&botId=${post.botId}`;
     return res.json({ url: workerUrl, via: 'worker' });
 
   }catch(e){
@@ -1228,7 +1232,7 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
       const { rows } = await db5.query(`SELECT file_id, "botId" FROM posts WHERE id=$1`, [req.query.postId]);
       if(rows[0]?.file_id){
         return res.json({
-          url: `https://golviral-stream.lawal94935.workers.dev/?file_id=${rows[0].file_id}&botId=${rows[0].botId}`,
+          url: `https://golviral-stream.lawal94935.workers.dev/?file_id=${encodeURIComponent(rows[0].file_id)}&botId=${rows[0].botId}`,
           via: 'worker-fallback'
         });
       }
