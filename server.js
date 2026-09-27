@@ -1216,13 +1216,81 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
       return res.status(404).json({error:'Media not ready'});
     }
 
-    // Call CDN to get fresh TG URL
-    const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh?file_id=${post.file_id}&botId=${post.botId}`, {
+    const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
+    const CDN_URL = process.env.CDN_URL;
+
+    const ua = (req.headers['user-agent'] || '').toLowerCase();
+    const isAndroid = ua.includes('android');
+
+    // Android = use Worker (Range + ffmpeg fix)
+    if(isAndroid){
+      const workerUrl = `${WORKER_URL}/?file_id=${post.file_id}&botId=${post.botId}`;
+      return res.json({ url: workerUrl, via: 'worker' });
+    }
+
+    // iOS / Desktop = direct CDN (faster, native player handles it)
+    const cdnRes = await axios.get(`${CDN_URL}/api/cdn/refresh?file_id=${post.file_id}&botId=${post.botId}`, {
       headers: { 'x-api-key': process.env.CDN_API_KEY }
     });
-    res.json({ url: cdnRes.data.url });
+
+    res.json({ url: cdnRes.data.url, via: 'cdn' });
+
   }catch(e){
     console.error('[Sign Error]', e.message);
+    // fallback to worker even on error - better than 500
+    try{
+      const { rows } = await db5.query(`SELECT file_id, "botId" FROM posts WHERE id=$1`, [req.query.postId]);
+      if(rows[0]?.file_id){
+        return res.json({
+          url: `https://golviral-stream.lawal94935.workers.dev/?file_id=${rows[0].file_id}&botId=${rows[0].botId}`,
+          via: 'worker-fallback'
+        });
+      }
+    }catch{}
+    res.status(500).json({error:'sign failed'});
+  }
+});app.get('/api/media/sign', authenticateToken, async (req,res)=>{
+  try{
+    const {postId} = req.query;
+    if(!postId) return res.status(400).json({error:'postId required'});
+
+    const { rows } = await db5.query(`SELECT file_id, "botId", type FROM posts WHERE id=$1`, [postId]);
+    const post = rows[0];
+    if(!post?.file_id || post?.botId === null){
+      return res.status(404).json({error:'Media not ready'});
+    }
+
+    const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
+    const CDN_URL = process.env.CDN_URL;
+
+    const ua = (req.headers['user-agent'] || '').toLowerCase();
+    const isAndroid = ua.includes('android');
+
+    // Android = use Worker (Range + ffmpeg fix)
+    if(isAndroid){
+      const workerUrl = `${WORKER_URL}/?file_id=${post.file_id}&botId=${post.botId}`;
+      return res.json({ url: workerUrl, via: 'worker' });
+    }
+
+    // iOS / Desktop = direct CDN (faster, native player handles it)
+    const cdnRes = await axios.get(`${CDN_URL}/api/cdn/refresh?file_id=${post.file_id}&botId=${post.botId}`, {
+      headers: { 'x-api-key': process.env.CDN_API_KEY }
+    });
+
+    res.json({ url: cdnRes.data.url, via: 'cdn' });
+
+  }catch(e){
+    console.error('[Sign Error]', e.message);
+    // fallback to worker even on error - better than 500
+    try{
+      const { rows } = await db5.query(`SELECT file_id, "botId" FROM posts WHERE id=$1`, [req.query.postId]);
+      if(rows[0]?.file_id){
+        return res.json({
+          url: `https://golviral-stream.lawal94935.workers.dev/?file_id=${rows[0].file_id}&botId=${rows[0].botId}`,
+          via: 'worker-fallback'
+        });
+      }
+    }catch{}
     res.status(500).json({error:'sign failed'});
   }
 });
