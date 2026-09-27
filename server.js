@@ -1212,20 +1212,14 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
   try{
     const {postId} = req.query;
     if(!postId) return res.status(400).json({error:'postId required'});
+
     const { rows } = await db5.query(`SELECT file_id, "botId", type FROM posts WHERE id=$1`, [postId]);
     const post = rows[0];
     if(!post?.file_id || post?.botId === null){
       return res.status(404).json({error:'Media not ready'});
     }
-    const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
 
-    // ALL REELS -> WORKER (Range fix for iOS, Android, Desktop)
-    if(post.type === 'reel'){
-      const workerUrl = `${WORKER_URL}/?file_id=${encodeURIComponent(post.file_id)}&botId=${post.botId}`;
-      return res.json({ url: workerUrl, via: 'worker' });
-    }
-
-    // ONLY IMAGES -> CDN (images don't need Range)
+    // ALL media = CDN - no isAndroid check
     const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh?file_id=${encodeURIComponent(post.file_id)}&botId=${post.botId}`, {
       headers: { 'x-api-key': process.env.CDN_API_KEY }
     });
@@ -1233,12 +1227,6 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
 
   }catch(e){
     console.error('[Sign Error]', e.message);
-    try{
-      const { rows } = await db5.query(`SELECT file_id, "botId" FROM posts WHERE id=$1`, [req.query.postId]);
-      if(rows[0]?.file_id){
-        return res.json({ url: `https://golviral-stream.lawal94935.workers.dev/?file_id=${encodeURIComponent(rows[0].file_id)}&botId=${rows[0].botId}`, via: 'worker-fallback' });
-      }
-    }catch{}
     res.status(500).json({error:'sign failed'});
   }
 });
