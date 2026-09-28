@@ -1205,28 +1205,32 @@ const bucketMap = {
  2: { client: b2Clients.b2c, bucket: b2Config.c.bucket }
 };
 
+const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
+const isAndroid = (req.headers['user-agent']||'').toLowerCase().includes('android');
+
 app.get('/api/media/sign', authenticateToken, async (req,res)=>{
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
   try{
     const {postId} = req.query;
-    if(!postId) return res.status(400).json({error:'postId required'});
-
-    const { rows } = await db5.query(`SELECT file_id, "botId", type FROM posts WHERE id=$1`, [postId]);
+    const { rows } = await db5.query(`SELECT file_id,"botId" FROM posts WHERE id=$1`, [postId]);
     const post = rows[0];
-    if(!post?.file_id || post?.botId === null){
-      return res.status(404).json({error:'Media not ready'});
-    }
+    if(!post?.file_id) return res.status(404).json({error:'Media not ready'});
 
-    // ALL media = CDN - no isAndroid check
+    // ALWAYS get fresh TG URL from CDN first
     const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh?file_id=${encodeURIComponent(post.file_id)}&botId=${post.botId}`, {
-      headers: { 'x-api-key': process.env.CDN_API_KEY }
+      headers: {'x-api-key': process.env.CDN_API_KEY}
     });
-    return res.json({ url: cdnRes.data.url, via: 'cdn' });
+    const tgUrl = cdnRes.data.url; // https://api.telegram.org/file/bot...
 
+    if(isAndroid){
+      // Android -> Worker streams the TG URL with CORS+Range
+      const workerUrl = `${WORKER_URL}/?src=${encodeURIComponent(tgUrl)}`;
+      return res.json({ url: workerUrl, via: 'worker-from-cdn' });
+    } else {
+      // iOS -> direct TG (you confirmed plays)
+      return res.json({ url: tgUrl, via: 'cdn-direct' });
+    }
   }catch(e){
-    console.error('[Sign Error]', e.message);
+    console.error('[Sign]', e.message);
     res.status(500).json({error:'sign failed'});
   }
 });
