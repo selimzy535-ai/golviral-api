@@ -1205,8 +1205,6 @@ const bucketMap = {
  2: { client: b2Clients.b2c, bucket: b2Config.c.bucket }
 };
 
-const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
-const isAndroid = (req.headers['user-agent']||'').toLowerCase().includes('android');
 
 app.get('/api/media/sign', authenticateToken, async (req,res)=>{
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
