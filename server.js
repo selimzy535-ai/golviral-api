@@ -1209,29 +1209,40 @@ const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
 const isAndroid = (req.headers['user-agent']||'').toLowerCase().includes('android');
 
 app.get('/api/media/sign', authenticateToken, async (req,res)=>{
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   try{
     const {postId} = req.query;
-    const { rows } = await db5.query(`SELECT file_id,"botId" FROM posts WHERE id=$1`, [postId]);
+    if(!postId) return res.status(400).json({error:'postId required'});
+
+    const { rows } = await db5.query(`SELECT file_id, "botId" FROM posts WHERE id=$1`, [postId]);
     const post = rows[0];
-    if(!post?.file_id) return res.status(404).json({error:'Media not ready'});
+    if(!post?.file_id || post?.botId === null){
+      return res.status(404).json({error:'Media not ready'});
+    }
+
+    // isAndroid INSIDE here - req exists here
+    const ua = (req.headers['user-agent']||'').toLowerCase();
+    const isAndroid = ua.includes('android');
 
     // ALWAYS get fresh TG URL from CDN first
     const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh?file_id=${encodeURIComponent(post.file_id)}&botId=${post.botId}`, {
-      headers: {'x-api-key': process.env.CDN_API_KEY}
+      headers: { 'x-api-key': process.env.CDN_API_KEY }
     });
-    const tgUrl = cdnRes.data.url; // https://api.telegram.org/file/bot...
+    const tgUrl = cdnRes.data.url;
 
     if(isAndroid){
-      // Android -> Worker streams the TG URL with CORS+Range
+      const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
       const workerUrl = `${WORKER_URL}/?src=${encodeURIComponent(tgUrl)}`;
       return res.json({ url: workerUrl, via: 'worker-from-cdn' });
     } else {
-      // iOS -> direct TG (you confirmed plays)
       return res.json({ url: tgUrl, via: 'cdn-direct' });
     }
+
   }catch(e){
-    console.error('[Sign]', e.message);
-    res.status(500).json({error:'sign failed'});
+    console.error('[Sign Error]', e.message);
+    return res.status(500).json({error:'sign failed'});
   }
 });
 app.get('/api/wallet', authenticateToken, async (req, res) => {
