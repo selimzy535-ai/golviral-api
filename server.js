@@ -2186,10 +2186,10 @@ cron.schedule('*/5 * * * *', async () => {
 });
 
 // 4. B2 Media Archive & Cleanup (Every Day at 3:00 AM)
-cron.schedule('0 3 * * *', async () => {
-  const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
+cron.schedule('0 3 */3 * *', async () => {
+  const cutoff72h = new Date(Date.now() - 72 * 60 * 60 * 1000);
+  const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
-  // Map b2Shard index to client + bucket
   const bucketMap = {
     0: { client: b2Clients.b2a, bucket: b2Config.a.bucket },
     1: { client: b2Clients.b2b, bucket: b2Config.b.bucket },
@@ -2197,38 +2197,73 @@ cron.schedule('0 3 * * *', async () => {
   };
 
   try {
-    // 1. Get all old posts from db5
-    const { rows: posts } = await db5.query(`
-      SELECT id, "mediaUrl", "b2Shard" FROM posts
-      WHERE "createdAt" < $1 
-        AND status='ACTIVE' 
-        AND ("isBoosted"=false OR "isBoosted" IS NULL)
-    `, [cutoff]);
+    // --- 1. B2 DELETE & MEDIA CLEANUP (older than 72h) ---
+    let b2Total = 0;
+    while (true) {
+      const { rows: posts } = await db5.query(`
+        SELECT id, "mediaUrl", "b2Shard" FROM posts
+        WHERE "createdAt" < $1
+          AND status = 'ACTIVE'
+          AND "mediaUrl" IS NOT NULL
+          AND "mediaUrl" NOT LIKE 'http%'
+          AND ("isBoosted" = false OR "isBoosted" IS NULL)
+        LIMIT 200
+      `, [cutoff72h]);
 
-    // 2. Delete from B2 and archive in db5
-    for (const p of posts) {
-      const b2 = bucketMap[p.b2Shard] || bucketMap[0]; // fallback to bucket A
+      if (posts.length === 0) break;
 
-      if (p.mediaUrl && !p.mediaUrl.startsWith('http')) {
-        await b2.client.send(new DeleteObjectCommand({ Bucket: b2.bucket, Key: p.mediaUrl })).catch(() => {});
+      for (const p of posts) {
+        const b2 = bucketMap[p.b2Shard] || bucketMap[0];
 
+        // Delete main media object from B2
+        await b2.client.send(new DeleteObjectCommand({ Bucket: b2.bucket, Key: p.mediaUrl }))
+          .catch(err => console.error(`Failed to delete B2 key ${p.mediaUrl}:`, err.message));
+
+        // Delete thumbnail object from B2
         const thumbKey = p.mediaUrl.replace('media/', 'thumbs/').replace(/\.[^/.]+$/, '.jpg');
-        await b2.client.send(new DeleteObjectCommand({ Bucket: b2.bucket, Key: thumbKey })).catch(() => {});
+        await b2.client.send(new DeleteObjectCommand({ Bucket: b2.bucket, Key: thumbKey }))
+          .catch(err => console.error(`Failed to delete B2 key ${thumbKey}:`, err.message));
+
+        // Update database record
+        await db5.query(
+          `UPDATE posts SET status = 'ARCHIVED', "mediaUrl" = NULL, "thumbnailUrl" = NULL WHERE id = $1`,
+          [p.id]
+        );
       }
 
-      await db5.query(`
-        UPDATE posts 
-        SET status='ARCHIVED', "mediaUrl"=null, "thumbnailUrl"=null 
-        WHERE id=$1
-      `, [p.id]).catch(() => {});
+      b2Total += posts.length;
+      if (posts.length < 200) break;
     }
 
-    if (posts.length > 0) {
-      console.log(`[B2 CRON] Archived ${posts.length} posts`);
+    // --- 2. DB ARCHIVE (older than 90d) ---
+    let dbTotal = 0;
+    while (true) {
+      const { rows: posts } = await db5.query(`
+        SELECT id FROM posts
+        WHERE "createdAt" < $1
+          AND status = 'ACTIVE'
+          AND ("isBoosted" = false OR "isBoosted" IS NULL)
+        LIMIT 500
+      `, [cutoff90d]);
+
+      if (posts.length === 0) break;
+
+      const ids = posts.map(p => p.id);
+      await db5.query(
+        `UPDATE posts SET status = 'ARCHIVED', "mediaUrl" = NULL, "thumbnailUrl" = NULL WHERE id = ANY($1)`,
+        [ids]
+      );
+
+      dbTotal += posts.length;
+      if (posts.length < 500) break;
     }
 
-  } catch (cronErr) {
-    console.error('[B2 Cron Archive Exception]', cronErr.message);
+    if (b2Total > 0 || dbTotal > 0) {
+      console.log(`[CRON 72H/90D] B2 Cleaned: ${b2Total} | DB Archived: ${dbTotal}`);
+    }
+
+  } catch (e) {
+    console.error('[CRON 72H/90D] Error:', e.message);
   }
 });
 
