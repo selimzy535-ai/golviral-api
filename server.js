@@ -1219,7 +1219,7 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
     const post = rows[0];
     if(!post?.file_id) return res.status(404).json({error:'Media not ready'});
 
-    const isImage = post.type === 'image' || post.type === 'photo';
+    const isImage = post.type === 'image' || post.type === 'store';
 
     // GET TG URL FROM CDN - with retry, no quick 8s fail
     let tgUrl;
