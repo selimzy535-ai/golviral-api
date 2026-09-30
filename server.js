@@ -1207,6 +1207,7 @@ const bucketMap = {
 
 
 app.get('/api/media/sign', authenticateToken, async (req,res)=>{
+  // HARD no-store on all layers
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -1221,8 +1222,14 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
 
     const { rows } = await db5.query(`SELECT file_id, "botId", type FROM posts WHERE id=$1`, [postId]);
     const post = rows[0];
-    if(!post?.file_id) return res.status(404).json({error:'Media not ready'});
+    if(!post?.file_id){
+      return res.status(404).json({error:'Media not ready'});
+    }
 
+    const ua = (req.headers['user-agent']||'').toLowerCase();
+    const isAndroid = ua.includes('android');
+
+    // Get fresh TG url (your CDN caches 4h but file_id never changes, ok)
     let tgUrl;
     try {
       const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh?file_id=${encodeURIComponent(post.file_id)}&botId=${post.botId||0}`, {
@@ -1234,37 +1241,37 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
       console.error('[sign cdn refresh fail]', err.message);
       return res.status(502).json({error:'cdn refresh failed'});
     }
+
     if(!tgUrl) return res.status(502).json({error:'no tg url'});
 
-    const isImage = (post.type||'').toLowerCase().includes('image') || post.type==='photo';
-
-    // ONLY IMAGES = DIRECT TG
-    if(isImage){
-      return res.json({
-        url: tgUrl,
-        via: 'cdn-direct-image',
+    if(isAndroid){
+      const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
+      // FIX: add postId + file_id to URL so every post has unique cache key
+      const workerUrl = `${WORKER_URL}/?src=${encodeURIComponent(tgUrl)}&postId=${encodeURIComponent(postId)}&file_id=${encodeURIComponent(post.file_id)}&_=${Date.now()}`;
+      return res.json({ 
+        url: workerUrl, 
+        via: 'worker-from-cdn',
+        type: post.type,
+        postId
+      });
+    } else {
+      // iOS / Desktop - direct TG, also bust with postId in json (frontend uses it)
+      return res.json({ 
+        url: tgUrl, 
+        via: 'cdn-direct',
         type: post.type,
         postId,
+        // add timestamp so frontend doesn't use cached signedUrlCache for wrong post
         ts: Date.now()
       });
     }
 
-    // EVERYTHING ELSE (video) = WORKER FOR iOS + ANDROID
-    const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
-    const workerUrl = `${WORKER_URL}/?src=${encodeURIComponent(tgUrl)}&postId=${encodeURIComponent(postId)}&file_id=${encodeURIComponent(post.file_id)}&botId=${post.botId||0}`;
-
-    return res.json({
-      url: workerUrl,
-      via: 'worker-all',
-      type: post.type,
-      postId
-    });
-
   }catch(e){
-    console.error('[Sign Error]', e.message);
+    console.error('[Sign Error]', e.message, e.stack);
     return res.status(500).json({error:'sign failed'});
   }
 });
+
 app.get('/api/wallet', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
