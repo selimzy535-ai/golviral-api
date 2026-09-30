@@ -1207,14 +1207,9 @@ const bucketMap = {
 
 
 app.get('/api/media/sign', authenticateToken, async (req,res)=>{
-  // HARD no-store on all layers
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
-  res.setHeader('Surrogate-Control', 'no-store');
-  res.setHeader('CDN-Cache-Control', 'no-store');
-  res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store');
-  res.setHeader('Vary', 'User-Agent');
 
   try{
     const {postId} = req.query;
@@ -1222,52 +1217,57 @@ app.get('/api/media/sign', authenticateToken, async (req,res)=>{
 
     const { rows } = await db5.query(`SELECT file_id, "botId", type FROM posts WHERE id=$1`, [postId]);
     const post = rows[0];
-    if(!post?.file_id){
-      return res.status(404).json({error:'Media not ready'});
+    if(!post?.file_id) return res.status(404).json({error:'Media not ready'});
+
+    const isImage = post.type === 'image' || post.type === 'photo';
+
+    // GET TG URL FROM CDN - with retry, no quick 8s fail
+    let tgUrl;
+    let lastErr;
+    for(let attempt=1; attempt<=3; attempt++){
+      try {
+        const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh?file_id=${encodeURIComponent(post.file_id)}&botId=${post.botId||0}`, {
+          headers: { 'x-api-key': process.env.CDN_API_KEY },
+          timeout: 25000 // 25s - wait for Render wakeup
+        });
+        tgUrl = cdnRes.data.url;
+        if(tgUrl) break;
+      } catch(err){
+        lastErr = err;
+        console.warn(`[sign retry ${attempt}/3]`, err.message);
+        await new Promise(r=>setTimeout(r, attempt*1500)); // wait 1.5s, 3s
+      }
     }
 
-    const ua = (req.headers['user-agent']||'').toLowerCase();
-    const isAndroid = ua.includes('android');
-
-    // Get fresh TG url (your CDN caches 4h but file_id never changes, ok)
-    let tgUrl;
-    try {
-      const cdnRes = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh?file_id=${encodeURIComponent(post.file_id)}&botId=${post.botId||0}`, {
-        headers: { 'x-api-key': process.env.CDN_API_KEY },
-        timeout: 8000
-      });
-      tgUrl = cdnRes.data.url;
-    } catch(err){
-      console.error('[sign cdn refresh fail]', err.message);
+    if(!tgUrl){
+      console.error('[sign cdn refresh fail final]', lastErr?.message);
       return res.status(502).json({error:'cdn refresh failed'});
     }
 
-    if(!tgUrl) return res.status(502).json({error:'no tg url'});
+    const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
 
-    if(isAndroid){
-      const WORKER_URL = 'https://golviral-stream.lawal94935.workers.dev';
-      // FIX: add postId + file_id to URL so every post has unique cache key
-      const workerUrl = `${WORKER_URL}/?src=${encodeURIComponent(tgUrl)}&postId=${encodeURIComponent(postId)}&file_id=${encodeURIComponent(post.file_id)}&_=${Date.now()}`;
+    // ONLY images -> TG direct
+    if(isImage){
       return res.json({ 
-        url: workerUrl, 
-        via: 'worker-from-cdn',
+        url: tgUrl, 
+        via: 'cdn-direct-image',
         type: post.type,
         postId
       });
-    } else {
-      // iOS / Desktop - direct TG, also bust with postId in json (frontend uses it)
-      return res.json({ 
-        url: tgUrl, 
-        via: 'cdn-direct',
-        type: post.type,
-        postId,
-        // add timestamp so frontend doesn't use cached signedUrlCache for wrong post
-        ts: Date.now()
-      });
     }
 
+    // iOS + Android videos -> ALL worker via CDN refresh src
+    const workerUrl = `${WORKER_URL}/?src=${encodeURIComponent(tgUrl)}&postId=${encodeURIComponent(postId)}`;
+
+    return res.json({ 
+      url: workerUrl, 
+      via: 'worker-from-cdn',
+      type: post.type,
+      postId
+    });
+
   }catch(e){
-    console.error('[Sign Error]', e.message, e.stack);
+    console.error('[Sign Error]', e.message);
     return res.status(500).json({error:'sign failed'});
   }
 });
