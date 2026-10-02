@@ -114,6 +114,81 @@ app.use(morgan('combined'));
 app.use('/api/admin', adminRoutes);
 app.use('/api/profile', profileRoutes);
 
+// ========== DYNAMIC OG FOR WHATSAPP / FB CRAWLERS ==========
+app.get('/u/:id', async (req,res)=>{
+  try{
+    const userId = req.params.id;
+    const { rows: profRows } = await profilePool.query(
+      `SELECT bio, avatar_file_id, avatar_bot_id FROM profiles WHERE user_id=$1`, [userId]
+    ).catch(()=>({rows:[]}));
+
+    let userObj = null;
+    for(const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]){
+      try{
+        const u = await db.user.findUnique({where:{id:userId}, select:{username:true}});
+        if(u){ userObj = u; break; }
+      }catch{}
+    }
+    const username = userObj?.username || userId;
+    const bio = profRows[0]?.bio || `${username} is earning on GolViral - Join me!`;
+
+    let avatarUrl = 'https://golviral.com/icon-512.png';
+    if(profRows[0]?.avatar_file_id && process.env.CDN_URL){
+      try{
+        const r = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh`, {
+          params:{file_id: profRows[0].avatar_file_id, botId: profRows[0].avatar_bot_id||0},
+          headers:{'x-api-key': process.env.CDN_API_KEY},
+          timeout:3000
+        });
+        if(r.data?.url) avatarUrl = r.data.url;
+      }catch{}
+    }
+
+    const html = `<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<title>@${username} on GolViral</title>
+<meta property="og:type" content="profile">
+<meta property="og:url" content="${APP_BASE_URL}/u/${userId}">
+<meta property="og:title" content="@${username} on GolViral - Earn Money">
+<meta property="og:description" content="${bio.slice(0,150)}">
+<meta property="og:image" content="${avatarUrl}">
+<meta property="og:site_name" content="GolViral">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="@${username} on GolViral">
+<meta name="twitter:description" content="${bio.slice(0,150)}">
+<meta name="twitter:image" content="${avatarUrl}">
+<meta http-equiv="refresh" content="0;url=${APP_BASE_URL}/profile.html?id=${userId}">
+<script>window.location.replace('/profile.html?id=${userId}')</script>
+</head><body>Redirecting to @${username}...</body></html>`;
+    res.set('Content-Type','text/html').send(html);
+  }catch(e){
+    res.redirect(`/profile.html?id=${req.params.id}`);
+  }
+});
+
+// For referral: /ref/CODE and /auth.html?ref=CODE
+app.get(['/ref/:code','/r/:code'], async (req,res)=>{
+  const code = req.params.code;
+  let username = 'GolViral';
+  try{
+    for(const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]){
+      const u = await db.user.findUnique({where:{id:code}, select:{username:true}}).catch(()=>null);
+      if(u){ username = u.username; break; }
+    }
+  }catch{}
+  const html = `<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<title>${username} invited you to GolViral</title>
+<meta property="og:title" content="${username} invited you - Earn ₦5000 on GolViral">
+<meta property="og:description" content="Join GolViral via @${username}'s link and start earning for watching reels, posting stories & referrals.">
+<meta property="og:image" content="https://golviral.com/icon-512.png">
+<meta property="og:url" content="${APP_BASE_URL}/ref/${code}">
+<meta http-equiv="refresh" content="0;url=${APP_BASE_URL}/auth.html?ref=${code}">
+<script>window.location.replace('/auth.html?ref=${code}')</script>
+</head><body>Redirecting...</body></html>`;
+  res.set('Content-Type','text/html').send(html);
+});
+
 // ========== 5. GLOBAL MEMORY & STATE MAPS ==========
 const onlineUsers = new Map();
 let interactionBuffer = [];
