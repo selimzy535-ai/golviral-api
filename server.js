@@ -34,7 +34,9 @@ if (!JWT_SECRET) {
 }
 
 // FIXED: Now points to your live custom domain
-const APP_BASE_URL = process.env.APP_BASE_URL || process.env.APPBASEURL || 'https://golviral.com';
+const APP_BASE_URL = process.env.APP_BASE_URL || 'https://golviral.com';
+const SITE_URL = APP_BASE_URL; // https://golviral.com
+const API_URL = process.env.API_URL || 'https://api.golviral.com';
 
 const SELAR_LINKS = {
   GIFT_RUBY: 'https://selar.com/17448y2c88',
@@ -115,6 +117,10 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/profile', profileRoutes);
 
 // ========== DYNAMIC OG FOR WHATSAPP / FB CRAWLERS ==========
+function esc(str=''){
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 app.get('/u/:id', async (req,res)=>{
   try{
     const userId = req.params.id;
@@ -129,10 +135,11 @@ app.get('/u/:id', async (req,res)=>{
         if(u){ userObj = u; break; }
       }catch{}
     }
-    const username = userObj?.username || userId;
-    const bio = profRows[0]?.bio || `${username} is earning on GolViral - Join me!`;
+    const username = userObj?.username || 'GolViral User';
+    const rawBio = profRows[0]?.bio || `${username} is on GolViral. Follow to see reels, stories and updates.`;
+    const bio = esc(rawBio.slice(0,160));
 
-    let avatarUrl = 'https://golviral.com/icon-512.png';
+    let avatarUrl = `${SITE_URL}/icon-512.png`;
     if(profRows[0]?.avatar_file_id && process.env.CDN_URL){
       try{
         const r = await axios.get(`${process.env.CDN_URL}/api/cdn/refresh`, {
@@ -146,46 +153,59 @@ app.get('/u/:id', async (req,res)=>{
 
     const html = `<!DOCTYPE html><html><head>
 <meta charset="UTF-8">
-<title>@${username} on GolViral</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>@${esc(username)} on GolViral</title>
 <meta property="og:type" content="profile">
-<meta property="og:url" content="${APP_BASE_URL}/u/${userId}">
-<meta property="og:title" content="@${username} on GolViral - Earn Money">
-<meta property="og:description" content="${bio.slice(0,150)}">
+<meta property="og:url" content="${API_URL}/u/${userId}">
+<meta property="og:title" content="@${esc(username)} on GolViral">
+<meta property="og:description" content="${bio}">
 <meta property="og:image" content="${avatarUrl}">
 <meta property="og:site_name" content="GolViral">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="@${username} on GolViral">
-<meta name="twitter:description" content="${bio.slice(0,150)}">
+<meta property="og:image:width" content="512">
+<meta property="og:image:height" content="512">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="@${esc(username)} on GolViral">
+<meta name="twitter:description" content="${bio}">
 <meta name="twitter:image" content="${avatarUrl}">
-<meta http-equiv="refresh" content="0;url=${APP_BASE_URL}/profile.html?id=${userId}">
-<script>window.location.replace('/profile.html?id=${userId}')</script>
-</head><body>Redirecting to @${username}...</body></html>`;
+<link rel="canonical" href="${SITE_URL}/profile.html?id=${userId}">
+<meta http-equiv="refresh" content="0;url=${SITE_URL}/profile.html?id=${userId}">
+<script>window.location.replace('${SITE_URL}/profile.html?id=${userId}')</script>
+</head><body style="font-family:sans-serif;text-align:center;padding:40px">Opening @${esc(username)}'s profile on GolViral...</body></html>`;
     res.set('Content-Type','text/html').send(html);
   }catch(e){
-    res.redirect(`/profile.html?id=${req.params.id}`);
+    res.redirect(`${SITE_URL}/profile.html?id=${req.params.id}`);
   }
 });
 
-// For referral: /ref/CODE and /auth.html?ref=CODE
 app.get(['/ref/:code','/r/:code'], async (req,res)=>{
   const code = req.params.code;
-  let username = 'GolViral';
+  let username = 'A friend';
   try{
     for(const db of [prismaClients.db1, prismaClients.db2, prismaClients.db3]){
       const u = await db.user.findUnique({where:{id:code}, select:{username:true}}).catch(()=>null);
       if(u){ username = u.username; break; }
     }
   }catch{}
+  const safeName = esc(username);
+
   const html = `<!DOCTYPE html><html><head>
 <meta charset="UTF-8">
-<title>${username} invited you to GolViral</title>
-<meta property="og:title" content="${username} invited you - Earn ₦5000 on GolViral">
-<meta property="og:description" content="Join GolViral via @${username}'s link and start earning for watching reels, posting stories & referrals.">
-<meta property="og:image" content="https://golviral.com/icon-512.png">
-<meta property="og:url" content="${APP_BASE_URL}/ref/${code}">
-<meta http-equiv="refresh" content="0;url=${APP_BASE_URL}/auth.html?ref=${code}">
-<script>window.location.replace('/auth.html?ref=${code}')</script>
-</head><body>Redirecting...</body></html>`;
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>You're invited by @${safeName} to join GolViral</title>
+<meta property="og:type" content="website">
+<meta property="og:url" content="${API_URL}/ref/${code}">
+<meta property="og:title" content="You're invited by @${safeName} to join GolViral">
+<meta property="og:description" content="GolViral is a community for creators to share reels and stories. Join through @${safeName}'s invitation to get started.">
+<meta property="og:image" content="${SITE_URL}/icon-512.png">
+<meta property="og:site_name" content="GolViral">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="You're invited by @${safeName} to join GolViral">
+<meta name="twitter:description" content="Join GolViral via @${safeName}'s invite - share reels, stories and grow together.">
+<meta name="twitter:image" content="${SITE_URL}/icon-512.png">
+<link rel="canonical" href="${SITE_URL}/auth.html?ref=${code}">
+<meta http-equiv="refresh" content="0;url=${SITE_URL}/auth.html?ref=${code}">
+<script>window.location.replace('${SITE_URL}/auth.html?ref=${code}')</script>
+</head><body style="font-family:sans-serif;text-align:center;padding:40px">Redirecting to GolViral invitation...</body></html>`;
   res.set('Content-Type','text/html').send(html);
 });
 
