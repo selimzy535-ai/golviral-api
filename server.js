@@ -1519,8 +1519,8 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
       isFollowing,
       followersList,
       followingList,
-      profileLink: `${APP_BASE_URL}/u/${targetId}`,
-      referralLink: `${APP_BASE_URL}/auth.html?ref=${targetId}`
+      profileLink: `${API_URL}/u/${targetId}`,
+referralLink: `${API_URL}/ref/${targetId}`Id}`
     });
   } catch (err) {
     console.error('[User Profile Error]', err.message);
