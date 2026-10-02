@@ -1475,7 +1475,7 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
 
     const monetized = await isUserMonetized(targetId);
 
-    // ===== FIXED: GET BIO + AVATAR WITH REFRESH =====
+    // ===== GET BIO + AVATAR WITH REFRESH =====
     let bio = "";
     let avatarUrl = null;
     try {
@@ -1520,7 +1520,7 @@ app.get('/api/user/:id', authenticateToken, async (req, res) => {
       followersList,
       followingList,
       profileLink: `${API_URL}/u/${targetId}`,
-referralLink: `${API_URL}/ref/${targetId}`Id}`
+      referralLink: `${API_URL}/ref/${targetId}`
     });
   } catch (err) {
     console.error('[User Profile Error]', err.message);
