@@ -99,13 +99,15 @@ async function processWalletTransaction({ userId, action, isCreator, meta = {} }
     }
     if (pointsToAdd === 0) return;
 
-    // DAILY CAP CHECK (on POINTS)
+    // DAILY SOFT CAP - 10k full, then 20% rate (no hard stop)
     if (walletType === 'CASH') {
       const today = new Date().toISOString().split('T')[0];
       const capKey = `cap:${userId}:${today}`;
       const current = parseFloat(await redis.get(capKey).catch(() => '0') || '0');
-      if (current >= 10000) return; // 10k points = ₦1k max per day
-      if (current + pointsToAdd > 10000) pointsToAdd = 10000 - current;
+      if (current >= 10000) {
+        pointsToAdd = Math.floor(pointsToAdd * 0.2); // 80% cut after 10k, but still pays
+        if (pointsToAdd === 0) pointsToAdd = 1; // always at least 1
+      }
       await redis.incrbyfloat(capKey, pointsToAdd).catch(() => {});
       await redis.expire(capKey, 90000).catch(() => {});
     }
