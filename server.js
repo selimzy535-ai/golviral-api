@@ -1610,21 +1610,18 @@ app.post('/api/wallet/withdraw', authenticateToken, requireFaceVerified, require
     const { userId } = req.user;
     const { amountPoints, method, routingTarget, targetDetails } = req.body; // method: 'BANK' or 'USDT'
     const numericPoints = Number(amountPoints);
-
     const db = getDbShard(userId);
     const redis = getRedisShard(userId);
 
     // 1. CHECK MONETIZATION: 7 days + 10 followers
     const user = await db.client.user.findUnique({ where: { id: userId } });
     if (!user) return res.status(404).json({ error: 'User not found' });
-
+    
     const days = Math.floor((Date.now() - new Date(user.createdAt).getTime()) / 86400000);
     const followers = await getTotalFollowers(userId);
-
+    
     if (!user.monetizeFlag && (days < 7 || followers < 10)) {
-      return res.status(403).json({ 
-        error: `Monetization required. You need 7 days and 10 followers. Current: ${days} days, ${followers} followers` 
-      });
+      return res.status(403).json({ error: `Monetization required. You need 7 days and 10 followers. Current: ${days} days, ${followers} followers` });
     }
 
     // Auto-flip monetizeFlag if they qualify now
@@ -1640,8 +1637,9 @@ app.post('/api/wallet/withdraw', authenticateToken, requireFaceVerified, require
       return res.status(400).json({ error: 'Minimum withdrawal is 50,000 pts (₦5000)' });
     }
 
-    // 3. BALANCE CHECK - MUST BE CASH
-    if (user.cashBalance < numericPoints) {
+    // 3. BALANCE CHECK - MUST BE CASH - FIXED
+    const cashNeeded = numericPoints / 10;
+    if (user.cashBalance < cashNeeded) {
       return res.status(400).json({ error: 'Insufficient cash balance. Free credits cannot be withdrawn' });
     }
 
@@ -1650,24 +1648,20 @@ app.post('/api/wallet/withdraw', authenticateToken, requireFaceVerified, require
       if (numericPoints !== 120000 && numericPoints !== 12000000) {
         return res.status(400).json({ error: 'USDT withdrawals only: 120,000 pts ($10) or 12,000,000 pts ($100)' });
       }
-
       // Safely resolve address whether sent as string or object
-      const usdtAddress = typeof targetDetails === 'string' 
-        ? targetDetails 
-        : (targetDetails?.address || '');
-
+      const usdtAddress = typeof targetDetails === 'string' ? targetDetails : (targetDetails?.address || '');
       const trc20Regex = /^T[A-Za-z1-9]{33}$/;
       if (!usdtAddress || !trc20Regex.test(usdtAddress.trim())) {
         return res.status(400).json({ error: 'Only USDT TRC20 addresses allowed' });
       }
-    } 
+    }
     // 5. BANK specific validation
     else if (method === 'BANK') {
       if (
-        !targetDetails || 
-        typeof targetDetails !== 'object' || 
-        !targetDetails.bankName || 
-        !targetDetails.accountNumber || 
+        !targetDetails ||
+        typeof targetDetails !== 'object' ||
+        !targetDetails.bankName ||
+        !targetDetails.accountNumber ||
         !targetDetails.accountName
       ) {
         return res.status(400).json({ error: 'Bank withdrawals require bankName, accountNumber, and accountName' });
@@ -1681,7 +1675,6 @@ app.post('/api/wallet/withdraw', authenticateToken, requireFaceVerified, require
     const recentPayout = await db.client.payoutQueue.findFirst({
       where: { userId, createdAt: { gte: sevenDaysAgo } }
     });
-
     if (recentPayout) {
       return res.status(429).json({ error: 'Withdrawal locked. 1 withdrawal per week only' });
     }
@@ -1689,14 +1682,15 @@ app.post('/api/wallet/withdraw', authenticateToken, requireFaceVerified, require
     // 7. SEND OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const payload = { amountPoints: numericPoints, method, routingTarget, targetDetails, otp };
-
+    
     await redis.set(`withdraw_otp:${userId}`, JSON.stringify(payload), 'EX', 600).catch(() => {
       global[`withdraw_otp_${userId}`] = { payload, exp: Date.now() + 600000 };
     });
-
+    
     await sendEmail(user.email, 'Withdrawal OTP - GolViral', `<p>Your withdrawal code: <b>${otp}</b>. Valid 10 minutes.</p>`);
+    
     res.json({ authChallenge: true, message: 'OTP sent to email' });
-
+    
   } catch (err) {
     console.error('[Withdraw Init Error]', err.message);
     res.status(500).json({ error: 'Withdrawal gateway error' });
