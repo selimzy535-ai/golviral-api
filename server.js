@@ -1720,28 +1720,34 @@ app.post('/api/wallet/withdraw/confirm', authenticateToken, async (req, res) => 
   if (!payload && global[`withdraw_otp_${userId}`] && global[`withdraw_otp_${userId}`].exp > Date.now()) {
     payload = JSON.stringify(global[`withdraw_otp_${userId}`].payload);
   }
-
   if (!payload) return res.status(400).json({ error: 'Session transaction validation expired' });
-  const parsed = JSON.parse(payload);
 
+  const parsed = JSON.parse(payload);
   if (parsed.otp !== String(otp).trim()) return res.status(400).json({ error: 'Verification payload invalid' });
 
   try {
+    const cashToDeduct = parsed.amountPoints / 10;
+
     await db.client.$transaction([
-      db.client.user.update({ where: { id: userId }, data: { cashBalance: { decrement: parsed.amountPoints } } }),
+      db.client.user.update({
+        where: { id: userId },
+        data: { cashBalance: { decrement: cashToDeduct } }
+      }),
       db.client.payoutQueue.create({
-        data: { 
-          id: crypto.randomBytes(8).toString('hex'), 
-          userId, 
-          amountPoints: parsed.amountPoints, 
-          routingTarget: parsed.routingTarget || parsed.method, 
-          targetDetails: typeof parsed.targetDetails === 'object' ? JSON.stringify(parsed.targetDetails) : parsed.targetDetails, 
-          status: 'PENDING' 
+        data: {
+          id: crypto.randomBytes(8).toString('hex'),
+          userId,
+          amountPoints: parsed.amountPoints,
+          routingTarget: parsed.routingTarget || parsed.method,
+          targetDetails: typeof parsed.targetDetails === 'object' ? JSON.stringify(parsed.targetDetails) : parsed.targetDetails,
+          status: 'PENDING'
         }
       })
     ]);
+
     await redis.del(`withdraw_otp:${userId}`).catch(() => {});
     delete global[`withdraw_otp_${userId}`];
+
     res.json({ transactionAcknowledged: true });
   } catch (err) {
     res.status(500).json({ error: 'Ledger synchronization tracking lock active' });
