@@ -218,12 +218,41 @@ router.post('/payouts/approve', requireAdmin, async (req, res) => {
   try {
     const { payoutId, userId } = req.body;
     const db = getDbShard(userId);
+
     const payout = await db.client.payoutQueue.findUnique({ where: { id: payoutId } });
     if (!payout) return res.status(404).json({ error: 'Payout not found' });
 
     await db.client.payoutQueue.update({ where: { id: payoutId }, data: { status: 'APPROVED' } });
+
     const amount = payout.amountPoints / 10;
-    sendNotification(userId, 'WITHDRAW', 'Withdrawal Approved ✅', `Your ₦${amount} withdrawal is approved and processing`);
+    const user = await db.client.user.findUnique({ where: { id: userId } });
+
+    // In-app notification
+    sendNotification(userId, 'WITHDRAW', 'Withdrawal Approved ✅', `Your ₦${amount.toLocaleString()} withdrawal is approved. Funds arrive in 30m - 24h`);
+
+    // Branded email receipt
+    if (user?.email) {
+      const html = `
+      <div style="font-family:Inter,Arial,sans-serif;max-width:480px;margin:0 auto;background:#ffffff;border:1px solid #eee;border-radius:12px;overflow:hidden">
+        <div style="background:linear-gradient(90deg,#00d084,#7b5cff);padding:16px 20px;color:white;font-weight:700;font-size:18px">GolViral</div>
+        <div style="padding:20px">
+          <h2 style="margin:0 0 8px 0">Withdrawal Approved ✅</h2>
+          <p style="margin:0 0 16px 0;color:#555">Your payout is on the way.</p>
+          <div style="background:#f8f9fa;border-radius:10px;padding:12px 16px;margin-bottom:16px">
+            <p style="margin:4px 0"><b>Amount:</b> ₦${amount.toLocaleString()}</p>
+            <p style="margin:4px 0"><b>Method:</b> ${payout.routingTarget}</p>
+            <p style="margin:4px 0"><b>Payout ID:</b> ${payout.id}</p>
+            <p style="margin:4px 0"><b>Date:</b> ${new Date().toLocaleString()}</p>
+          </div>
+          <p style="margin:0 0 6px 0;font-weight:600">Funds will arrive in 30m - 24h</p>
+          <p style="margin:0;color:#777;font-size:13px">Need help? support@golviral.com</p>
+        </div>
+        <div style="text-align:center;padding:12px;color:#aaa;font-size:11px">© GolViral • Grow Viral</div>
+      </div>`;
+
+      await sendEmail(user.email, `Withdrawal Approved - ₦${amount.toLocaleString()}`, html).catch(()=>{});
+    }
+
     res.json({ success: true, shard: db.name });
   } catch (e) {
     console.error('[Payout Approve Error]', e.message);
