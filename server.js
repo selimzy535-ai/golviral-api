@@ -1004,18 +1004,29 @@ app.post('/api/read-session', authenticateToken, (req, res) => {
 app.get('/api/feed', async (req, res) => {
   try {
     const now = new Date().toISOString();
+    
+    // Read type and limit from frontend
+    const rawType = (req.query.type || 'reel').toLowerCase();
+    const limit = Math.min(parseInt(req.query.limit) || 70, 70); // force 70 max
+    
+    // Map frontend names to DB types
+    const allowedTypes = ['reel', 'novel', 'store', 'image'];
+    const type = allowedTypes.includes(rawType) ? rawType : 'reel';
+
     const { rows } = await db5.query(`
       SELECT
         id, "userId", type, title, content, "b2Shard", caption, file_id, "botId",
         likes, comments, views, score, "createdAt",
-        CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $1 THEN true ELSE false END as "isBoosted"
+        CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $2 THEN true ELSE false END as "isBoosted"
       FROM posts
-      WHERE status='ACTIVE'
-      ORDER BY CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $1 THEN 1 ELSE 0 END DESC, score DESC
-      LIMIT 30
-    `, [now]);
+      WHERE status='ACTIVE' AND type=$1
+      ORDER BY CASE WHEN "isBoosted" = true AND "boostExpiresAt" > $2 THEN 1 ELSE 0 END DESC, score DESC, id DESC
+      LIMIT $3
+    `, [type, now, limit]);
+
     res.json(rows);
   } catch(err) {
+    console.error('[Feed Error]', err.message);
     res.status(500).json({ error: 'Failed to load feed' });
   }
 });
